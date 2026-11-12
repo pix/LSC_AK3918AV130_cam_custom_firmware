@@ -1,0 +1,1475 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>LSC Camera</title>
+<style>
+:root{
+  --bg:#f5f6f8;--surface:#fff;--surface-2:#f9fafb;--line:#e4e7ec;--line-2:#d0d5dd;
+  --fg:#101828;--fg-2:#344054;--muted:#667085;
+  --accent:#2563eb;--accent-hover:#1d4ed8;--accent-soft:#eff4ff;--accent-fg:#fff;
+  --ok:#067647;--ok-soft:#ecfdf3;--warn:#b54708;--warn-soft:#fffaeb;--danger:#d92d20;--danger-soft:#fef3f2;
+  --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.04);
+  --r:12px;--r-sm:8px;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0b0f14;--surface:#12171e;--surface-2:#171d26;--line:#232b36;--line-2:#2f3946;
+  --fg:#e7ecf2;--fg-2:#c4ccd6;--muted:#8a96a6;
+  --accent:#4f8cff;--accent-hover:#6a9dff;--accent-soft:#16233b;--accent-fg:#fff;
+  --ok:#47cd89;--ok-soft:#0f2a1d;--warn:#fdb022;--warn-soft:#2e2208;--danger:#f97066;--danger-soft:#33100d;
+  --shadow:0 1px 2px rgba(0,0,0,.4);
+}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+/* header */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--surface) 92%,transparent);backdrop-filter:saturate(1.4) blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1320px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;margin-right:auto;min-width:0}
+.logo{width:32px;height:32px;border-radius:9px;background:var(--accent);color:#fff;display:grid;place-items:center;flex:none}
+.logo svg.i{width:18px;height:18px}
+.name{font-weight:600;font-size:15px;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:12px;font-family:var(--mono)}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--fg-2);font-size:12.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.chip svg.i{width:14px;height:14px;color:var(--muted)}
+a.chip:hover{text-decoration:none;border-color:var(--line-2)}
+.chip.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 30%,var(--line))}.chip.ok svg.i{color:var(--ok)}
+.chip.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,var(--line))}.chip.warn svg.i{color:var(--warn)}
+
+/* banners */
+.banners{max-width:1320px;margin:0 auto;padding:12px 20px 0;display:grid;gap:8px}
+.banner{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:var(--r-sm);font-size:13.5px;border:1px solid}
+.banner.warn{background:var(--warn-soft);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 25%,transparent)}
+.banner.info{background:var(--accent-soft);color:var(--fg-2);border-color:color-mix(in srgb,var(--accent) 20%,transparent)}
+.banner .grow{flex:1}
+
+/* layout */
+.layout{max-width:1320px;margin:0 auto;padding:16px 20px 40px;display:grid;gap:20px;grid-template-columns:minmax(0,1fr);align-items:start}
+@media (min-width:1040px){.layout{grid-template-columns:minmax(0,1.5fr) minmax(380px,1fr)}.viewer{position:sticky;top:72px}}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+
+/* viewer */
+.viewer{overflow:hidden}
+.vbox{position:relative;background:#000;aspect-ratio:16/9;border-radius:var(--r) var(--r) 0 0;overflow:hidden}
+.vbox video,.vbox img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
+.vbox:fullscreen{border-radius:0}
+.badge{position:absolute;top:12px;left:12px;display:flex;align-items:center;gap:7px;padding:4px 10px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;backdrop-filter:blur(4px)}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:#98a2b3}
+.badge.live .dot{background:#f04438;box-shadow:0 0 0 3px rgba(240,68,56,.25)}
+.osd{position:absolute;padding:3px 8px;border-radius:5px;background:rgba(0,0,0,.5);color:#fff;font:600 12.5px/1.3 var(--mono);pointer-events:none}
+.osd.tl{left:12px;top:44px}.osd.tr{right:12px;top:12px}.osd.bl{left:12px;bottom:12px}.osd.br{right:12px;bottom:12px}
+.vbar{display:flex;align-items:center;gap:6px;padding:10px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.vbar .grow{flex:1}
+.stream{display:flex;align-items:center;gap:10px;padding:10px 14px;font-size:13px;color:var(--muted);flex-wrap:wrap}
+.stream code{flex:1;min-width:0}
+.slabel{width:44px;font-size:12px;font-weight:600;letter-spacing:.03em;color:var(--muted)}
+.cert{padding:12px 16px;border-top:1px solid var(--line);display:grid;gap:8px}
+.cert-h{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.cert dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0;font-size:12.5px}
+.cert dt{color:var(--muted)}.cert dd{margin:0;min-width:0}
+.cert dd code{font-size:11.5px;display:inline-block;max-width:100%}
+.vu{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:240px;font-size:12px;color:var(--muted)}
+.vu-bar{position:relative;flex:none;width:96px;height:8px;border-radius:4px;background:var(--line);overflow:hidden}
+.vu-bar i{position:absolute;left:0;top:0;bottom:0;width:0;background:linear-gradient(90deg,#12b76a 0,#12b76a 58px,#f79009 58px,#f79009 80px,#f04438 80px);background-size:96px 100%;transition:width 60ms linear}
+.vu-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat{padding:0 14px 12px;margin:-4px 0 0;color:var(--muted);font-size:12.5px}
+
+/* buttons */
+button,.btn{font:inherit;font-size:13.5px;font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:34px;padding:0 13px;border-radius:var(--r-sm);border:1px solid var(--line-2);background:var(--surface);color:var(--fg-2);cursor:pointer;white-space:nowrap;transition:background .12s,border-color .12s,color .12s}
+button:hover,.btn:hover{background:var(--surface-2);text-decoration:none}
+button:focus-visible,.btn:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary,.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+button.primary:hover,.btn.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
+button.danger{color:var(--danger)}button.danger:hover{background:var(--danger-soft);border-color:color-mix(in srgb,var(--danger) 35%,var(--line-2))}
+button.ghost{border-color:transparent;background:transparent}button.ghost:hover{background:var(--surface-2)}
+button.icon{width:34px;padding:0}
+button.sm{height:28px;padding:0 9px;font-size:12.5px}button.sm.icon{width:28px}
+button.active{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 35%,var(--line-2));color:var(--accent)}
+button:disabled{opacity:.5;cursor:default}
+
+/* tabs */
+.panel{min-width:0}
+/* section picker: a wrapping grid, so every section stays visible however
+ * narrow the settings column is (no hidden, scrolled-away tabs) */
+.tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-bottom:16px;   /* 9 sections: 3 x 3 */
+  padding:6px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r)}
+.tabs button{height:36px;border:1px solid transparent;border-radius:var(--r-sm);background:none;color:var(--muted);
+  padding:0 10px;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tabs button:hover{color:var(--fg);background:var(--surface-2)}
+.tabs button[aria-selected=true]{color:var(--accent);background:var(--accent-soft);border-color:var(--accent);font-weight:600}
+.tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.tabpanel{display:grid;gap:16px}
+
+/* settings groups */
+.group h3{margin:0;padding:14px 16px 0;font-size:14px;font-weight:600;letter-spacing:-.005em}
+.group .gdesc{margin:2px 0 0;padding:0 16px;color:var(--muted);font-size:13px}
+.rows{margin-top:8px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 16px;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.rows .row:first-child{border-top:1px solid var(--line)}
+.rl{min-width:0}
+.rt{font-weight:500;color:var(--fg)}
+.rd{color:var(--muted);font-size:12.5px;margin-top:1px}
+.rc{flex:none;display:flex;align-items:center;gap:8px}
+.row.wrap{flex-wrap:wrap}.row.wrap .rc{flex:1 1 100%;justify-content:flex-start}
+@media (min-width:520px){.row.wrap{flex-wrap:nowrap}.row.wrap .rc{flex:none}}
+.row.stack{display:block}.row.stack .rc{margin-top:8px;flex-wrap:wrap}
+.gfoot{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;padding:12px 16px;border-top:1px solid var(--line);background:var(--surface-2);border-radius:0 0 var(--r) var(--r)}
+.gbody{padding:12px 16px 16px}
+.gbody p{margin:0 0 10px}.gbody p:last-child{margin-bottom:0}
+.muted{color:var(--muted);font-size:13px}
+
+/* inputs */
+input[type=text],input[type=password],select{width:100%;height:36px;font:inherit;padding:0 11px;border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--surface);color:var(--fg)}
+input::placeholder{color:var(--muted)}
+.field{margin-top:12px}.field:first-child{margin-top:0}
+.field label{display:block;font-size:13px;font-weight:500;color:var(--fg-2);margin-bottom:6px}
+.field .hint{color:var(--muted);font-size:12.5px;margin-top:5px}
+.grid2{display:grid;gap:12px;grid-template-columns:1fr}
+@media (min-width:560px){.grid2{grid-template-columns:1fr 1fr}.grid2 .field{margin-top:0}}
+.rc input[type=text]{width:220px}
+@media (max-width:519px){.rc input[type=text]{width:100%}}
+
+/* segmented control */
+.seg{display:inline-flex;padding:3px;gap:2px;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;flex-wrap:wrap}
+.seg button{height:28px;padding:0 11px;border:0;border-radius:6px;background:transparent;color:var(--muted);font-size:13px}
+.seg button:hover{color:var(--fg);background:transparent}
+.seg button.on{background:var(--surface);color:var(--fg);box-shadow:0 1px 2px rgba(16,24,40,.12),0 0 0 1px var(--line)}
+
+/* switch */
+.sw{position:relative;display:inline-block;width:38px;height:22px;flex:none}
+.sw input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;z-index:1}
+.sw span{position:absolute;inset:0;border-radius:999px;background:var(--line-2);transition:background .15s}
+.sw span::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}
+.sw input:checked+span{background:var(--accent)}
+.sw input:checked+span::after{transform:translateX(16px)}
+.sw input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}
+
+/* slider */
+.slider{display:flex;align-items:center;gap:12px;width:240px}
+.slider input{flex:1;accent-color:var(--accent)}
+.val{width:3.5ch;text-align:right;font-variant-numeric:tabular-nums;color:var(--fg-2)}
+@media (max-width:519px){.slider{width:100%}}
+
+code,.code{font:12.5px/1.5 var(--mono);background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:2px 6px;word-break:break-all;color:var(--fg-2)}
+pre.code{display:block;padding:9px 11px;margin:6px 0 0;white-space:pre-wrap}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:0;margin:0}
+.kv dt,.kv dd{padding:9px 16px;border-top:1px solid var(--line);margin:0}
+.kv dt{color:var(--muted)}.kv dd{text-align:right;font-variant-numeric:tabular-nums;color:var(--fg)}
+.kv dt:first-of-type,.kv dd:first-of-type{border-top:0}
+.status{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:500;padding:2px 9px;border-radius:999px;background:var(--surface-2);color:var(--muted);border:1px solid var(--line)}
+.status.ok{color:var(--ok);background:var(--ok-soft);border-color:transparent}
+.status.warn{color:var(--warn);background:var(--warn-soft);border-color:transparent}
+.ghead{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px 0}
+.ghead h3{padding:0}
+.nets{display:grid;gap:6px;margin-top:10px}
+.nets button{justify-content:space-between;height:38px;width:100%}
+.nets .sig{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px}
+details{border-top:1px solid var(--line)}
+details summary{cursor:pointer;padding:12px 16px;font-weight:500;color:var(--fg-2);list-style:none;display:flex;align-items:center;gap:8px}
+details summary::-webkit-details-marker{display:none}
+details summary::before{content:"";width:6px;height:6px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s;margin:0 4px 0 2px}
+details[open] summary::before{transform:rotate(45deg)}
+.steps{margin:0;padding:0 16px 14px 16px;display:grid;gap:8px;font-size:13px;color:var(--fg-2)}
+.steps b{color:var(--fg);font-weight:600}
+
+.days{display:flex;gap:6px;flex-wrap:wrap}
+.days button.on{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 35%,var(--line-2));color:var(--accent)}
+.files{display:grid;gap:0;margin-top:12px;border:1px solid var(--line);border-radius:var(--r-sm);overflow:hidden}
+.file{display:flex;align-items:center;gap:10px;padding:8px 10px;border-top:1px solid var(--line);font-size:13px}
+.file:first-child{border-top:0}
+.file .t{font-variant-numeric:tabular-nums;font-weight:500;width:5.5em}
+.file .k{flex:1;color:var(--muted)}
+.file.sel{background:var(--accent-soft)}
+.viewer-media{margin-top:12px;border-radius:var(--r-sm);overflow:hidden;background:#000}
+.viewer-media video,.viewer-media img{display:block;width:100%;max-height:420px;object-fit:contain}
+.zones{position:relative;margin-top:10px;border-radius:8px;overflow:hidden;background:#000;aspect-ratio:16/9;touch-action:none;user-select:none}
+.zones img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.85}
+.zones canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
+.meter{position:relative;height:10px;border-radius:5px;background:var(--line);overflow:hidden;width:240px}
+.meter i{position:absolute;left:0;top:0;bottom:0;background:var(--accent);transition:width 120ms linear}
+.meter b{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--danger)}
+@media (max-width:519px){.meter{width:100%}}
+input[type=number]{width:90px;height:36px;font:inherit;padding:0 10px;border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--surface);color:var(--fg)}
+.filebtn{position:relative;overflow:hidden}.filebtn input{position:absolute;inset:0;opacity:0;cursor:pointer}
+#toast{position:fixed;left:50%;bottom:20px;transform:translate(-50%,8px);background:var(--fg);color:var(--bg);padding:9px 14px;border-radius:var(--r-sm);font-size:13.5px;opacity:0;transition:opacity .18s,transform .18s;pointer-events:none;max-width:calc(100% - 32px);box-shadow:0 8px 24px rgba(16,24,40,.18);z-index:50}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+#toast.err{background:var(--danger);color:#fff}
+.sched{display:grid;grid-template-columns:34px repeat(24,1fr);gap:2px;user-select:none;touch-action:none}
+.sched .h{font-size:10px;color:var(--muted);text-align:center}.sched .d{font-size:11.5px;color:var(--muted);align-self:center}
+.sched .c{height:18px;border-radius:3px;background:var(--line);cursor:pointer}.sched .c.on{background:var(--accent)}
+.sched.priv .c.on{background:#b4232a}
+@media (max-width:640px){.sched{grid-template-columns:28px repeat(24,1fr);gap:1px}.sched .h:nth-child(odd){visibility:hidden}.sched .c{height:16px}}
+</style>
+</head>
+<body>
+<header class="top"><div class="top-in">
+  <div class="brand">
+    <span class="logo"><i data-i="cam"></i></span>
+    <div><div class="name">LSC Camera</div><div class="sub" id="hostline"></div></div>
+  </div>
+  <div class="chips">
+    <span class="chip" id="c_mode"><i data-i="sun"></i><span>…</span></span>
+    <span class="chip" id="c_up" title="Uptime"><i data-i="clock"></i><span>…</span></span>
+    <span class="chip" id="c_temp" title="Temperature" hidden><i data-i="thermo"></i><span></span></span>
+    <span class="chip" id="c_wifi" title="Wi-Fi signal"><i data-i="wifi"></i><span>…</span></span>
+    <a class="chip" id="c_tls" href="#security"><i data-i="lock"></i><span>…</span></a>
+  </div>
+</div></header>
+
+<div class="banners">
+  <div class="banner warn" id="defwarn" hidden><i data-i="alert"></i><span class="grow">This camera still uses the default login <b>admin / admin</b>.</span><a href="#security">Change login</a></div>
+  <div class="banner info" id="httpwarn" hidden><i data-i="unlock"></i><span class="grow">This connection is not encrypted. The camera can serve this page over HTTPS with its own certificate.</span><a href="#security">Set up HTTPS</a></div>
+</div>
+
+<main class="layout">
+  <section class="card viewer" aria-label="Live view">
+    <div class="vbox" id="vbox">
+      <video id="live" muted playsinline></video>
+      <img id="snap" alt="Camera snapshot" hidden>
+      <div class="badge" id="badge"><span class="dot"></span><span id="badgetxt">Connecting</span></div>
+      <div class="osd tl" id="osd" hidden></div>
+    </div>
+    <div class="vbar">
+      <button id="livebtn" class="ghost"><i data-i="pause"></i><span>Pause</span></button>
+      <button id="soundbtn" class="ghost"><i data-i="mute"></i><span>Sound off</span></button>
+      <button id="talkbtn" class="ghost" hidden title="Hold to speak through the camera speaker, or click to start and click again to stop"><i data-i="mic"></i><span>Hold to talk</span></button>
+      <span class="vu" id="vu" hidden title="Microphone level sent to the camera"><span class="vu-bar"><i id="vufill"></i></span><span class="vu-label" id="vulabel"></span></span>
+      <span class="grow"></span>
+      <button id="refresh" class="ghost icon" title="Refresh snapshot" hidden><i data-i="refresh"></i></button>
+      <button id="shotbtn" class="ghost icon" title="Save a snapshot"><i data-i="image"></i></button>
+      <button id="fsbtn" class="ghost icon" title="Full screen"><i data-i="max"></i></button>
+    </div>
+    <div class="stream">
+      <span class="slabel">RTSP</span><code id="rtsp"></code>
+      <button class="sm icon" data-copy="rtsp" title="Copy stream address"><i data-i="copy"></i></button>
+    </div>
+    <div class="stream" style="padding-top:0">
+      <span class="slabel">RTSPS</span><code id="rtsps"></code>
+      <button class="sm icon" data-copy="rtsps" title="Copy encrypted stream address"><i data-i="copy"></i></button>
+    </div>
+    <p class="stat" id="livestat"></p>
+  </section>
+
+  <section class="panel">
+    <nav class="tabs" role="tablist" aria-label="Settings">
+      <button role="tab" data-tab="image">Image</button>
+      <button role="tab" data-tab="overlay">Overlay</button>
+      <button role="tab" data-tab="events">Events</button>
+      <button role="tab" data-tab="recordings">Recordings</button>
+      <button role="tab" data-tab="audio">Audio</button>
+      <button role="tab" data-tab="integrations">Integrations</button>
+      <button role="tab" data-tab="network">Network</button>
+      <button role="tab" data-tab="security">Security</button>
+      <button role="tab" data-tab="system">System</button>
+    </nav>
+
+    <!-- Image -->
+    <div class="tabpanel" role="tabpanel" data-panel="image">
+      <div class="card group">
+        <h3>Picture</h3>
+        <p class="gdesc">Changes apply immediately and are kept after a reboot.</p>
+        <div class="rows">
+          <div class="row wrap"><div class="rl"><div class="rt">Day / night</div><div class="rd">Colour by day, infrared black and white at night</div></div>
+            <div class="rc"><div class="seg" id="mode"><button data-v="auto">Auto</button><button data-v="day">Day</button><button data-v="night">Night</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Automatic switching</div><div class="rd">Original firmware: switches back to day only when the scene shows real colour (not just infrared light). Exposure: simpler exposure thresholds. <span id="lightnow"></span></div></div>
+            <div class="rc"><div class="seg" id="algo"><button data-v="stock">Original firmware</button><button data-v="exposure">Exposure</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Infrared lights</div><div class="rd">Used in night mode</div></div>
+            <div class="rc"><div class="seg" id="ir"><button data-v="auto">Auto</button><button data-v="on">On</button><button data-v="off">Off</button></div></div></div>
+          <div class="row stack"><div class="rl"><div class="rt">Orientation</div><div class="rd">For a camera mounted upside down or seen in a mirror</div></div>
+            <div class="rc"><div class="seg" id="orient"><button data-f="0" data-m="0">Normal</button><button data-f="1" data-m="1">Upside down</button><button data-f="0" data-m="1">Mirror</button><button data-f="1" data-m="0">Flip</button></div></div></div>
+        </div>
+      </div>
+      <div class="card group">
+        <h3>Adjustments</h3>
+        <div class="rows" id="sliders"></div>
+        <div class="rows">
+          <div class="row wrap"><div class="rl"><div class="rt">Backlight (WDR)</div><div class="rd">Lifts shadows and tames bright windows; 0 = calibrated</div></div>
+            <div class="rc"><div class="slider"><input type="range" id="wdr" min="-50" max="50" value="0" aria-label="WDR"><span class="val" id="wdr_v">0</span></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Noise reduction</div><div class="rd">Higher = smoother but less detail, mostly visible at night; 0 = calibrated</div></div>
+            <div class="rc"><div class="slider"><input type="range" id="nr" min="-50" max="50" value="0" aria-label="Noise reduction"><span class="val" id="nr_v">0</span></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Anti-flicker</div><div class="rd">Mains frequency of your lights</div></div>
+            <div class="rc"><div class="seg" id="flicker"><button data-v="50">50 Hz</button><button data-v="60">60 Hz</button><button data-v="off">Off</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">H.264 profile</div><div class="rd">High is a little better at the same bitrate; takes effect after a restart</div></div>
+            <div class="rc"><div class="seg" id="vprofile"><button data-v="main">Main</button><button data-v="high">High</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Frame rate when idle</div><div class="rd">After 10 s without motion and with nobody watching here, record and stream at this rate; full rate again as soon as something moves (5 fps: about 70% less storage). Needs motion detection</div></div>
+            <div class="rc"><div class="seg" id="idlefps"><button data-v="off">Off</button><button data-v="10">10</button><button data-v="5">5</button><button data-v="3">3</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Full rate on motion in</div><div class="rd">Motion zones only (like recordings), or anywhere in the picture</div></div>
+            <div class="rc"><div class="seg" id="idlewake"><button data-v="zones">Zones</button><button data-v="all">Whole picture</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Smart encoding</div><div class="rd">Fewer keyframes while the scene is static (a few % on busy scenes, more on calm ones); takes effect after a restart</div></div>
+            <div class="rc"><div class="seg" id="vsmart"><button data-v="off">Off</button><button data-v="gop">Variable GOP</button><button data-v="ltr">Long-term ref</button></div></div></div>
+        </div>
+      </div>
+      <div class="card group">
+        <div class="ghead"><h3>Video quality</h3><span class="status" id="vq_now"></span></div>
+        <p class="gdesc">For the stream (RTSP, live view, ONVIF) and SD recordings, which store the stream as it is. <span id="vq_note"></span></p>
+        <div class="rows">
+          <div class="row stack"><div class="rl"><div class="rt">Bitrate</div><div class="rd" id="vq_est">Higher keeps more detail in motion and at night; uses more Wi-Fi and SD space</div></div>
+            <div class="rc"><div class="seg" id="vq_preset"><button data-v="768">Low</button><button data-v="1536">Standard</button><button data-v="2560">High</button><button data-v="4096">Max</button></div>
+              <input type="number" id="vq_kbps" min="256" max="4096" step="64" style="width:96px"> kbps</div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Keyframe every</div><div class="rd">Shorter: recordings and viewers start faster, seeking is finer. Longer: smaller files</div></div>
+            <div class="rc"><div class="seg" id="vq_gop"><button data-v="15">1 s</button><button data-v="30">2 s</button><button data-v="60">4 s</button><button data-v="120">8 s</button></div></div></div>
+        </div>
+        <div class="gfoot"><span class="muted" style="margin-right:auto">Bitrate and keyframe changes need a restart (about a minute).</span><button class="primary" id="vq_save">Save and restart</button></div>
+        <div class="rows">
+          <div class="row wrap"><div class="rl"><div class="rt">Second stream</div><div class="rd">640x360 at about 0.5 Mbit/s for phones, grids and slow links: <code id="sub_url" style="white-space:nowrap"></code> (also an ONVIF profile). Takes effect after a restart. <span id="sub_note"></span></div></div>
+            <div class="rc"><label class="sw"><input type="checkbox" id="sub_en" aria-label="Second stream"><span></span></label></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Picture quality</div><div class="rd">JPEG quality of snapshots and event pictures (applies at once)</div></div>
+            <div class="rc"><div class="slider"><input type="range" id="vq_jpeg" min="30" max="95" step="5" value="80" aria-label="Picture quality"><span class="val" id="vq_jpeg_v">80</span></div></div></div>
+        </div>
+      </div>
+      <div class="card group">
+        <h3>Privacy masks</h3>
+        <p class="gdesc">Hidden in the video, recordings and snapshots. Drag to draw up to 4 areas; click an area to remove it.</p>
+        <div class="gbody">
+          <div class="zones" id="mzones"><img id="mimg" alt=""><canvas id="mcv" width="640" height="360"></canvas></div>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
+            <div class="seg" id="mstyle"><button data-v="color">Solid</button><button data-v="mosaic">Mosaic</button></div>
+            <input type="color" id="mcolor" value="#000000" aria-label="Mask colour" style="width:44px;height:34px;padding:2px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface)">
+            <span style="flex:1"></span><button class="sm" id="mclear">Remove all</button><button class="sm" id="msnap">Refresh picture</button>
+          </div>
+        </div>
+        <div class="gfoot"><button class="primary" id="msave">Save masks</button></div>
+      </div>
+    </div>
+
+    <!-- Overlay -->
+    <div class="tabpanel" role="tabpanel" data-panel="overlay" hidden>
+      <div class="card group">
+        <div class="ghead"><h3>Video overlay</h3><span class="status" id="osd_state"></span></div>
+        <p class="gdesc">Burned into the video: RTSP, recordings, live view and snapshots.</p>
+        <div class="rows">
+          <div class="row"><div class="rl"><div class="rt">Show overlay</div></div><div class="rc"><label class="sw"><input type="checkbox" id="osd_en" aria-label="Show overlay"><span></span></label></div></div>
+          <div class="row"><div class="rl"><div class="rt">Date and time</div></div><div class="rc"><label class="sw"><input type="checkbox" id="osd_time" aria-label="Date and time"><span></span></label></div></div>
+          <div class="row"><div class="rl"><div class="rt">Day / night mode</div></div><div class="rc"><label class="sw"><input type="checkbox" id="osd_mode" aria-label="Day / night mode"><span></span></label></div></div>
+          <div class="row"><div class="rl"><div class="rt">Frame rate</div><div class="rd">Shows the current rate, e.g. 5 FPS while idle</div></div><div class="rc"><label class="sw"><input type="checkbox" id="osd_fps" aria-label="Frame rate"><span></span></label></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Text before</div><div class="rd">Up to 32 characters</div></div><div class="rc"><input type="text" id="osd_pre" maxlength="32" placeholder="e.g. Front door"></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Text after</div><div class="rd">Up to 32 characters</div></div><div class="rc"><input type="text" id="osd_suf" maxlength="32"></div></div>
+          <div class="row stack"><div class="rl"><div class="rt">Position</div></div>
+            <div class="rc"><div class="seg" id="osd_pos"><button data-v="tl">Top left</button><button data-v="tr">Top right</button><button data-v="bl">Bottom left</button><button data-v="br">Bottom right</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Text size</div><div class="rd">Large fits about 40 characters</div></div>
+            <div class="rc"><div class="seg" id="osd_size"><button data-v="1">Normal</button><button data-v="2">Large</button></div></div></div>
+        </div>
+        <div class="gfoot"><button class="primary" id="osd_save">Save overlay</button></div>
+        <div class="rows">
+          <div class="row wrap"><div class="rl"><div class="rt">Overlay drawn by this page</div><div class="rd">Shown on the live view here only when the video has none (overlay off, failed or skipped)</div></div>
+            <div class="rc"><label class="sw"><input type="checkbox" id="web_osd" aria-label="Overlay drawn by this page" checked><span></span></label></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recordings -->
+    <div class="tabpanel" role="tabpanel" data-panel="recordings" hidden>
+      <div class="card group">
+        <div class="ghead"><h3>SD card recording</h3><span class="status" id="rec_state">…</span></div>
+        <p class="gdesc" id="rec_sd">…</p>
+        <div class="rows">
+          <div class="row stack"><div class="rl"><div class="rt">Record</div><div class="rd">Video and sound as MP4, plus a picture for every event. Motion and sound use the detection settings in <a href="#events">Events</a>.</div></div>
+            <div class="rc"><div class="seg" id="rec_mode"><button data-v="off">Off</button><button data-v="motion">On motion</button><button data-v="sound">On sound</button><button data-v="events">Motion or sound</button><button data-v="continuous">Continuously</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Before the event</div><div class="rd">Seconds kept from before it started</div></div>
+            <div class="rc"><div class="slider"><input type="range" id="rec_pre" min="0" max="4" value="3" aria-label="Pre-roll"><span class="val" id="rec_pre_v">3</span></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">After the event</div><div class="rd">Seconds recorded after it stops</div></div><div class="rc"><input type="number" id="rec_post" min="2" max="120" value="10"> s</div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">File length</div><div class="rd">Continuous mode</div></div><div class="rc"><input type="number" id="rec_seg" min="1" max="60" value="10"> min</div></div>
+          <div class="row"><div class="rl"><div class="rt">Record sound</div></div><div class="rc"><label class="sw"><input type="checkbox" id="rec_audio" aria-label="Record sound"><span></span></label></div></div>
+          <div class="row"><div class="rl"><div class="rt">Save event pictures</div></div><div class="rc"><label class="sw"><input type="checkbox" id="rec_snaps" aria-label="Save event pictures"><span></span></label></div></div>
+          <div class="row stack"><div class="rl"><div class="rt">Timelapse</div><div class="rd">One picture every interval into a video per day (in addition to the recording mode above)</div></div>
+            <div class="rc"><div class="seg" id="tl_int"><button data-v="0">Off</button><button data-v="10">10 s</button><button data-v="30">30 s</button><button data-v="60">1 min</button><button data-v="300">5 min</button><button data-v="900">15 min</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Timelapse speed</div><div class="rd">Pictures per second when played back</div></div>
+            <div class="rc"><div class="seg" id="tl_fps"><button data-v="10">10</button><button data-v="15">15</button><button data-v="25">25</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Keep free</div><div class="rd">The oldest recordings are deleted to keep this much space</div></div><div class="rc"><input type="number" id="rec_keep" min="100" max="100000" value="500"> MB</div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Keep for</div><div class="rd">Delete recordings older than this many days (0 = only when space runs out). Needs the clock set by NTP.</div></div><div class="rc"><input type="number" id="rec_keepdays" min="0" max="3650" value="0"> days</div></div>
+        </div>
+        <div class="gfoot"><button class="primary" id="rec_save">Save recording settings</button></div>
+      </div>
+      <div class="card group">
+        <div class="ghead"><h3>Schedule</h3><span class="status" id="sc_state"></span></div>
+        <p class="gdesc" id="sc_desc"></p>
+        <div class="seg" id="sc_which" style="margin-bottom:12px"><button data-v="record" class="on">Recording</button><button data-v="events">Alerts</button><button data-v="privacy">Privacy</button></div>
+        <div class="sched" id="sc_grid" role="grid" aria-label="Weekly schedule"></div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="sm" id="sc_all">Every hour</button><button class="sm" id="sc_none">No hour</button><button class="sm" id="sc_work">Weekdays 8-18</button><button class="sm" id="sc_nights">Nights 22-7</button></div>
+        <div class="gfoot"><button class="primary" id="sc_save">Save schedule</button></div>
+      </div>
+      <div class="card group">
+        <div class="ghead"><h3>Browse</h3><div style="display:flex;gap:8px"><a class="btn" href="/recordings" style="height:28px;font-size:12.5px"><i data-i="ext"></i>All recordings</a><button class="sm" id="rec_reload"><i data-i="refresh"></i><span>Refresh</span></button></div></div>
+        <div class="gbody">
+          <div class="days" id="rec_days"><span class="muted">No recordings yet.</span></div>
+          <div class="viewer-media" id="rec_view" hidden></div>
+          <div class="files" id="rec_files" hidden></div>
+          <div style="display:flex;justify-content:flex-end;margin-top:10px" id="rec_dayact" hidden><button class="sm danger" id="rec_delday">Delete this day</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Audio -->
+    <div class="tabpanel" role="tabpanel" data-panel="audio" hidden>
+      <div class="card group">
+        <div class="ghead"><h3>Speaker</h3><span class="status" id="spkstat">…</span></div>
+        <div class="rows">
+          <div class="row wrap"><div class="rl"><div class="rt">Volume</div></div>
+            <div class="rc"><div class="slider"><input type="range" id="vol" min="0" max="100" step="5" value="80" aria-label="Volume"><span class="val" id="vol_v">80</span></div></div></div>
+          <div class="row stack"><div class="rl"><div class="rt">Play a sound</div></div>
+            <div class="rc"><button data-snd="chime">Chime</button><button data-snd="custom">Custom sound</button><button data-snd="tone">Test tone</button></div></div>
+        </div>
+        <div class="gbody" id="talkhint"><p class="muted">Talking through the camera from this page needs HTTPS (browsers only allow the microphone on secure pages). <a href="#security">Set up HTTPS</a></p></div>
+      </div>
+      <div class="card group">
+        <h3>Stream audio</h3>
+        <div class="rows">
+          <div class="row wrap"><div class="rl"><div class="rt">RTSP audio format</div><div class="rd">G.711 works directly in go2rtc / WebRTC; L16 is uncompressed</div></div>
+            <div class="rc"><div class="seg" id="acodec"><button data-v="pcmu">G.711 µ-law</button><button data-v="l16">L16</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Microphone gain</div><div class="rd">Analog gain before encoding; also changes sound detection levels</div></div>
+            <div class="rc"><select id="micgain" aria-label="Microphone gain"><option value="-1">Driver default</option><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option></select></div></div>
+          <div class="row"><div class="rl"><div class="rt">Microphone off</div><div class="rd">Silence in streams, recordings and sound detection</div></div><div class="rc"><label class="sw"><input type="checkbox" id="micmute" aria-label="Microphone off"><span></span></label></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Mute while playing</div><div class="rd">Always: silence the mic during any playback. Auto: only while the mic hears the playback, so quiet sounds keep the live audio running</div></div><div class="rc"><div class="seg" id="micmop"><button data-v="off">Off</button><button data-v="on">Always</button><button data-v="auto">Auto</button></div></div></div>
+          <div class="row"><div class="rl"><div class="rt">Automatic gain</div><div class="rd">Keeps speech at a steady level</div></div><div class="rc"><label class="sw"><input type="checkbox" id="micagc" aria-label="Automatic gain"><span></span></label></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Noise gate</div><div class="rd">Below this level the mic is silenced (off = no gate)</div></div>
+            <div class="rc"><div class="slider"><input type="range" id="micgate" min="-90" max="-20" step="5" value="-90" aria-label="Noise gate"><span class="val" id="micgate_v">off</span></div></div></div>
+          <div class="row"><div class="rl"><div class="rt">Echo cancellation</div><div class="rd">Removes the camera speaker's sound from the microphone, so both sides can talk at once (restart after enabling). <span id="micaec_st"></span></div></div><div class="rc"><label class="sw"><input type="checkbox" id="micaec" aria-label="Echo cancellation"><span></span></label></div></div>
+        </div>
+      </div>
+      <div class="card group">
+        <div class="ghead"><h3>Webhook</h3></div>
+        <p class="gdesc">Play sounds from Home Assistant or scripts. Keep the token secret.</p>
+        <div class="rows">
+          <div class="row wrap"><div class="rl"><div class="rt">Token</div><div class="rd"><code id="hooktok">••••••••••••••••</code></div></div>
+            <div class="rc"><button id="hookshow">Show</button><button id="hooknew" class="danger">New token</button></div></div>
+        </div>
+        <div class="gbody" id="hookex" hidden>
+          <p class="muted">Built-in sound</p><pre class="code" id="hookex1"></pre>
+          <p class="muted" style="margin-top:10px">Your own WAV file</p><pre class="code" id="hookex2"></pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Events -->
+    <div class="tabpanel" role="tabpanel" data-panel="events" hidden>
+      <div class="card group">
+        <div class="ghead"><h3>Motion detection</h3><span class="status" id="md_state">…</span></div>
+        <p class="gdesc">Sends events to Home Assistant (MQTT), the webhook below and the SD recorder. <span id="md_last"></span></p>
+        <div class="rows">
+          <div class="row"><div class="rl"><div class="rt">Detect motion</div></div><div class="rc"><label class="sw"><input type="checkbox" id="md_en" aria-label="Detect motion"><span></span></label></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Detector</div><div class="rd">Image comparison, or the image processor's own per-block motion statistic (as in the original firmware; less sensitive to noise in the dark) <span id="md_hwnote" style="color:var(--warn,#b54708)"></span></div></div>
+            <div class="rc"><div class="seg" id="md_src"><button data-v="software">Image</button><button data-v="hardware">Image processor</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Sensitivity</div><div class="rd">Higher reacts to smaller changes</div></div>
+            <div class="rc"><div class="slider"><input type="range" id="md_sens" min="1" max="100" value="50" aria-label="Sensitivity"><span class="val" id="md_sens_v">50</span></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Stay active for</div><div class="rd">Seconds after the last movement</div></div>
+            <div class="rc"><input type="number" id="md_hold" min="2" max="300" value="10"> s</div></div>
+          <div class="row stack"><div class="rl"><div class="rt">Zones</div><div class="rd">Click or drag to choose the watched areas (shaded = ignored). Red = moving now.</div></div>
+            <div class="rc" style="display:block;width:100%">
+              <div class="zones" id="zones"><img id="zimg" alt=""><canvas id="zcv" width="640" height="360"></canvas></div>
+              <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="sm" id="z_all">Watch everything</button><button class="sm" id="z_none">Clear</button><button class="sm" id="z_inv">Invert</button><button class="sm" id="z_snap">Refresh picture</button></div>
+            </div></div>
+        </div>
+        <div class="gfoot"><button class="primary" id="md_save">Save motion settings</button></div>
+      </div>
+      <div class="card group">
+        <div class="ghead"><h3>Sound detection</h3><span class="status" id="sd_state">…</span></div>
+        <p class="gdesc">Loud noises (a bark, a door, glass) from the camera microphone. The camera's own speaker is ignored. <span id="sd_last"></span></p>
+        <div class="rows">
+          <div class="row"><div class="rl"><div class="rt">Detect sound</div></div><div class="rc"><label class="sw"><input type="checkbox" id="sd_en" aria-label="Detect sound"><span></span></label></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Level now</div><div class="rd">The red mark is the trigger level</div></div>
+            <div class="rc"><div class="meter" id="sd_meter"><i id="sd_fill"></i><b id="sd_mark"></b></div><span class="val" id="sd_now" style="width:7ch">—</span></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Trigger level</div><div class="rd">dBFS; closer to 0 needs louder sounds</div></div>
+            <div class="rc"><div class="slider"><input type="range" id="sd_thr" min="-60" max="-5" value="-30" aria-label="Trigger level"><span class="val" id="sd_thr_v" style="width:4ch">-30</span></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Stay active for</div></div><div class="rc"><input type="number" id="sd_hold" min="1" max="60" value="5"> s</div></div>
+        </div>
+        <div class="gfoot"><button class="primary" id="sd_save">Save sound settings</button></div>
+      </div>
+      <div class="card group">
+        <div class="ghead"><h3>Tamper alert</h3><span class="status" id="tp_state">…</span></div>
+        <p class="gdesc">Alerts when the lens is covered for 10 seconds, or when the camera is turned to a different view for 20 seconds (it then learns the new view after a minute). Sent like motion events; Home Assistant shows a Tamper sensor. <span id="tp_last"></span></p>
+        <div class="rows">
+          <div class="row"><div class="rl"><div class="rt">Detect tampering</div></div><div class="rc"><label class="sw"><input type="checkbox" id="tp_en" aria-label="Detect tampering"><span></span></label></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Now</div><div class="rd">Match with the learned view (1 = same); texture (near 0 = covered)</div></div>
+            <div class="rc"><span class="muted" id="tp_now">—</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Integrations -->
+    <div class="tabpanel" role="tabpanel" data-panel="integrations" hidden>
+      <div class="card group">
+        <div class="ghead"><h3>MQTT (Home Assistant)</h3><span class="status" id="mq_state">…</span></div>
+        <p class="gdesc">Motion, sound, temperature, controls and a last-motion picture appear automatically in Home Assistant (MQTT discovery).</p>
+        <div class="rows">
+          <div class="row"><div class="rl"><div class="rt">Connect to a broker</div></div><div class="rc"><label class="sw"><input type="checkbox" id="mq_en" aria-label="Enable MQTT"><span></span></label></div></div>
+        </div>
+        <div class="gbody">
+          <div class="grid2">
+            <div class="field"><label for="mq_host">Broker</label><input type="text" id="mq_host" placeholder="homeassistant.local or 192.168.1.10"></div>
+            <div class="field"><label for="mq_port">Port</label><input type="text" id="mq_port" inputmode="numeric" placeholder="1883 (8883 with TLS)"></div>
+            <div class="field"><label for="mq_user">User</label><input type="text" id="mq_user" autocomplete="off"></div>
+            <div class="field"><label for="mq_pass">Password</label><input type="password" id="mq_pass" autocomplete="new-password"></div>
+            <div class="field"><label for="mq_topic">Base topic</label><input type="text" id="mq_topic"></div>
+          </div>
+        </div>
+        <div class="rows">
+          <div class="row"><div class="rl"><div class="rt">Home Assistant discovery</div></div><div class="rc"><label class="sw"><input type="checkbox" id="mq_disc" aria-label="Discovery"><span></span></label></div></div>
+          <div class="row"><div class="rl"><div class="rt">Publish a picture on motion</div><div class="rd">Shown as the "Last motion" camera in Home Assistant</div></div><div class="rc"><label class="sw"><input type="checkbox" id="ev_snap" aria-label="Snapshot on motion"><span></span></label></div></div>
+          <div class="row"><div class="rl"><div class="rt">TLS</div><div class="rd">Encrypted connection (usually port 8883)</div></div><div class="rc"><label class="sw"><input type="checkbox" id="mq_tls" aria-label="TLS"><span></span></label></div></div>
+        </div>
+        <div id="mq_tlsbox">
+          <div class="rows">
+            <div class="row stack"><div class="rl"><div class="rt">Verify the broker</div><div class="rd">With its CA certificate, or by pinning its key. "Off" is for testing only.</div></div>
+              <div class="rc"><div class="seg" id="mq_verify"><button data-v="on">CA certificate</button><button data-v="pin">Pinned key</button><button data-v="off">Off</button></div></div></div>
+            <div class="row wrap"><div class="rl"><div class="rt">Broker CA certificate</div><div class="rd" id="mq_ca">…</div></div>
+              <div class="rc"><button id="mq_fetch"><i data-i="download"></i>Fetch from broker</button><label class="btn filebtn"><i data-i="download"></i>Upload<input type="file" id="mq_ca_file" accept=".crt,.pem,.cer"></label><button class="sm danger" id="mq_ca_clear">Remove</button></div></div>
+            <div class="row wrap"><div class="rl"><div class="rt">Pinned broker key</div><div class="rd"><code id="mq_pin">—</code></div></div></div>
+            <div class="row stack" id="mq_fetched" hidden><div class="rl"><div class="rt">The broker presented</div><div class="rd">Check the fingerprints against your broker before trusting.</div></div>
+              <div class="rc" style="display:block;width:100%"><div id="mq_chain"></div>
+                <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="primary" id="mq_trust_ca">Trust this CA</button><button id="mq_trust_pin">Pin the broker key</button></div></div></div>
+            <div class="row stack"><div class="rl"><div class="rt">Client certificate</div><div class="rd" id="mq_cc_desc"></div></div>
+              <div class="rc"><div class="seg" id="mq_cc"><button data-v="none">None</button><button data-v="camera">Issued by this camera</button><button data-v="custom">My own</button></div></div></div>
+            <div class="row stack" id="mq_cc_camera" hidden><div class="rl"><div class="rd">Add the camera CA to the broker's trusted CAs (mosquitto: <code>cafile</code> with <code>require_certificate true</code>). The camera sends the client certificate <span id="mq_camcert"></span>.</div></div>
+              <div class="rc"><a class="btn" href="/api/tls/ca.crt" download="lsc-camera-ca.crt"><i data-i="download"></i>Camera CA</a><a class="btn" href="/api/mqtt/camera.crt" download><i data-i="download"></i>Client certificate</a></div></div>
+            <div class="row stack" id="mq_cc_custom" hidden><div class="rl"><div class="rd">Either upload a certificate and its key, or let the camera create the key and sign its request (CSR) with your CA — then the key never leaves the camera. Current: <span id="mq_cuscert"></span></div></div>
+              <div class="rc"><button id="mq_csr"><i data-i="download"></i>Create key + CSR</button><label class="btn filebtn"><i data-i="download"></i>Upload certificate<input type="file" id="mq_cert_file" accept=".crt,.pem,.cer"></label><label class="btn filebtn"><i data-i="download"></i>Upload key<input type="file" id="mq_key_file" accept=".key,.pem"></label></div></div>
+          </div>
+        </div>
+        <div class="gfoot"><button class="primary" id="mq_save">Save MQTT settings</button></div>
+      </div>
+      <div class="card group">
+        <h3>ONVIF</h3>
+        <p class="gdesc">For NVRs (Synology, Blue Iris, Frigate) and Home Assistant's ONVIF integration: discovery, stream, snapshot and motion/sound events. Log in with the camera login.</p>
+        <div class="rows">
+          <div class="row"><div class="rl"><div class="rt">Enable ONVIF</div><div class="rd">Device service: <code id="onvif_url"></code></div></div>
+            <div class="rc"><label class="sw"><input type="checkbox" id="onvif_en" aria-label="Enable ONVIF"><span></span></label></div></div>
+        </div>
+      </div>
+      <div class="card group">
+        <div class="ghead"><h3>Event webhook</h3><span class="status" id="wh_state"></span></div>
+        <p class="gdesc">The camera POSTs <code>{"camera","event","state","time"}</code> JSON here on motion and sound (plain HTTP, e.g. a Home Assistant webhook).</p>
+        <div class="gbody"><div class="field"><label for="wh_url">URL</label><input type="text" id="wh_url" placeholder="http://homeassistant.local:8123/api/webhook/camera-motion"></div></div>
+        <div class="gfoot"><button class="primary" id="wh_save">Save webhook</button></div>
+      </div>
+    </div>
+
+    <!-- Network -->
+    <div class="tabpanel" role="tabpanel" data-panel="network" hidden>
+      <div class="card group">
+        <div class="ghead"><h3>Wi-Fi</h3><button class="sm" id="scan"><i data-i="refresh"></i><span>Scan</span></button></div>
+        <p class="gdesc" id="wifistat">…</p>
+        <p class="gdesc" id="wifilast"></p>
+        <div class="gbody">
+          <div id="nets" class="nets"></div>
+          <form id="wifi" autocomplete="off">
+            <div class="grid2" style="margin-top:12px">
+              <div class="field"><label for="ssid">Network name</label><input type="text" id="ssid" required maxlength="32"></div>
+              <div class="field"><label for="psk">Password</label><input type="password" id="psk" maxlength="63" autocomplete="new-password" placeholder="Empty for an open network"></div>
+            </div>
+            <div class="field"><div class="hint">The camera tries the new network for up to 45 s and goes back to the current one if it fails.</div></div>
+            <div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="primary" type="submit">Connect</button></div>
+          </form>
+        </div>
+      </div>
+      <div class="card group">
+        <h3>Set up with a QR code</h3>
+        <div class="gbody">
+          <p class="muted">Press the reset button three times (the status LED blinks), then hold your phone's “Share Wi-Fi” QR code 40–60 cm in front of the lens for a few seconds. A camera without saved Wi-Fi looks for a code automatically. A <code>wifi.txt</code> file with <code>ssid=…</code> and <code>password=…</code> lines on the SD card also works.</p>
+        </div>
+        <div class="gfoot"><button id="qrstart">Look for a QR code now (3 min)</button></div>
+      </div>
+      <div class="card group" id="apsec" hidden>
+        <h3>Access point</h3>
+        <p class="gdesc">The camera can create its own network <b id="apname">LSC-Camera</b> (address <code>192.168.4.1</code>) for setup.</p>
+        <div class="rows">
+          <div class="row"><div class="rl"><div class="rt">Start when Wi-Fi is lost</div><div class="rd">After 5 minutes without a connection</div></div><div class="rc"><label class="sw"><input type="checkbox" id="fallback" aria-label="Start when Wi-Fi is lost"><span></span></label></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Password</div><div class="rd">8–63 characters</div></div><div class="rc"><input type="text" id="appass" minlength="8" maxlength="63" autocomplete="new-password" placeholder="unchanged"><button id="apsave">Save</button></div></div>
+        </div>
+        <div class="gfoot"><button id="apstart" class="danger">Start access point (15 min)</button></div>
+      </div>
+    </div>
+
+    <!-- Security -->
+    <div class="tabpanel" role="tabpanel" data-panel="security" hidden>
+      <div class="card group">
+        <h3>Login</h3>
+        <p class="gdesc">Used for this page, RTSP and the tuning port 8091.</p>
+        <form id="cred" autocomplete="off" class="gbody">
+          <div class="grid2">
+            <div class="field"><label for="user">Username</label><input type="text" id="user" required maxlength="32" pattern="[A-Za-z0-9._\-]+" autocomplete="username"></div>
+            <div class="field"><label for="cur">Current password</label><input type="password" id="cur" required autocomplete="current-password"></div>
+            <div class="field"><label for="p1">New password</label><input type="password" id="p1" required minlength="4" maxlength="64" autocomplete="new-password"></div>
+            <div class="field"><label for="p2">Repeat new password</label><input type="password" id="p2" required minlength="4" maxlength="64" autocomplete="new-password"></div>
+          </div>
+          <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="primary" type="submit">Save login</button></div>
+        </form>
+      </div>
+      <div class="card group">
+        <div class="ghead"><h3>HTTPS</h3><span class="status" id="tls_state">…</span></div>
+        <p class="gdesc">The camera has its own certificate authority. Install its certificate once on each device to open this page over HTTPS without warnings. The same certificate secures RTSPS on port 322.</p>
+        <div class="rows">
+          <div class="cert">
+            <div class="cert-h"><div><div class="rt">Certificate authority</div><div class="rd" id="tls_ca">…</div></div>
+              <a class="btn" href="/api/tls/ca.crt" download="lsc-camera-ca.crt"><i data-i="download"></i>CA certificate</a></div>
+            <dl><dt>SHA-256</dt><dd><code id="tls_fp">…</code></dd><dt>Key pin</dt><dd><code id="tls_ca_spki">…</code></dd></dl>
+          </div>
+          <div class="cert">
+            <div class="cert-h"><div><div class="rt">Server certificate</div><div class="rd" id="tls_cov">…</div></div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn" href="/api/tls/server.crt" download="lsc-camera-server.crt"><i data-i="download"></i>Certificate</a>
+              <a class="btn" href="/api/tls/fullchain.pem" download="lsc-camera-fullchain.pem"><i data-i="download"></i>Full chain</a></div></div>
+            <dl><dt>SHA-256</dt><dd><code id="tls_srv_fp">…</code></dd><dt>Key pin</dt><dd><code id="tls_srv_spki">…</code></dd></dl>
+            <div class="rd">For pinning (e.g. a reverse proxy), use the key pin: the camera keeps its key when the certificate is renewed, so it stays the same. The certificate SHA-256 changes on every renewal.</div>
+          </div>
+          <div class="row wrap"><div class="rl"><div class="rt">DNS names</div><div class="rd">Names you use to reach the camera, comma separated (up to 4)</div></div>
+            <div class="rc"><input type="text" id="tls_names" placeholder="e.g. camera.lan" maxlength="300"></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Other host names</div><div class="rd">For a reverse proxy that forwards a different name (e.g. Traefik). The page only answers to IP addresses, the DNS names above, the camera's network name and these, which blocks DNS-rebinding attacks.</div></div>
+            <div class="rc"><input type="text" id="web_hosts" placeholder="e.g. cam.example.org" maxlength="250"></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Reverse proxy address</div><div class="rd">IP address of the proxy (e.g. Traefik), comma separated. Its requests are attributed to the client in X-Forwarded-For, so a wrong password from outside does not lock out the proxy. Leave empty without a proxy.</div></div>
+            <div class="rc"><input type="text" id="web_proxies" placeholder="e.g. 192.168.1.10" maxlength="120"></div></div>
+          <div class="row"><div class="rl"><div class="rt">Redirect HTTP to HTTPS</div><div class="rd">The certificate download and webhooks stay on HTTP</div></div>
+            <div class="rc"><label class="sw"><input type="checkbox" id="tls_redirect" aria-label="Redirect HTTP to HTTPS"><span></span></label></div></div>
+        </div>
+        <details>
+          <summary>How to install the certificate</summary>
+          <div class="steps">
+            <div><b>Windows</b> — open the file, Install Certificate, Local Machine, place it in “Trusted Root Certification Authorities”.</div>
+            <div><b>macOS</b> — open the file to add it to Keychain Access, double-click it, and set Trust to “Always Trust”.</div>
+            <div><b>iPhone / iPad</b> — download it in Safari, install it in Settings › Profile Downloaded, then enable it in Settings › General › About › Certificate Trust Settings.</div>
+            <div><b>Android</b> — Settings › Security › Encryption &amp; credentials › Install a certificate › CA certificate.</div>
+            <div><b>Firefox</b> — Settings › Privacy &amp; Security › Certificates › View Certificates › Authorities › Import, and trust it for websites.</div>
+            <div><b>Chrome / Edge on Linux</b> — Settings › Privacy and security › Security › Manage certificates › Import (trusted for websites).</div>
+          </div>
+        </details>
+        <div class="gfoot">
+          <button class="danger" id="tls_newca">New CA…</button>
+          <span style="flex:1"></span>
+          <a class="btn" id="tls_open" hidden><i data-i="ext"></i>Open over HTTPS</a>
+          <button class="primary" id="tls_save">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- System -->
+    <div class="tabpanel" role="tabpanel" data-panel="system" hidden>
+      <div class="card group">
+        <h3>Health</h3>
+        <dl class="kv" id="health" style="margin-top:10px"></dl>
+      </div>
+      <div class="card group">
+        <h3>Time</h3>
+        <p class="gdesc" id="clock">…</p>
+        <div class="gbody">
+          <div class="grid2">
+            <div class="field"><label for="ntp">NTP server</label><input type="text" id="ntp" maxlength="63" placeholder="pool.ntp.org"></div>
+            <div class="field"><label for="tz">Time zone</label><select id="tz"></select></div>
+          </div>
+        </div>
+        <div class="gfoot"><button class="primary" id="timesave">Save time settings</button></div>
+      </div>
+      <div class="card group">
+        <h3>Device</h3>
+        <div class="rows">
+          <div class="row wrap"><div class="rl"><div class="rt">Camera name</div><div class="rd">Shown here, in Home Assistant and in webhooks</div></div>
+            <div class="rc"><input type="text" id="devname" maxlength="32"><button id="devname_save">Save</button></div></div>
+          <div class="row"><div class="rl"><div class="rt">Status LED</div></div><div class="rc"><label class="sw"><input type="checkbox" id="led" aria-label="Status LED"><span></span></label></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">LED activity</div><div class="rd">Fast blink during motion, slow blink while recording</div></div>
+            <div class="rc"><div class="seg" id="ledfb"><button data-v="off">Off</button><button data-v="motion">Motion</button><button data-v="recording">Recording</button><button data-v="both">Both</button></div></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Restart</div><div class="rd">Back in about a minute</div></div><div class="rc"><button id="reboot">Reboot</button></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Image settings</div><div class="rd">Restore defaults and reboot</div></div><div class="rc"><button class="danger" id="resetset">Reset</button></div></div>
+        </div>
+        <div class="gbody"><p class="muted">Forgot the login? Hold the reset button for 10 seconds, or boot with a file named <code>reset_auth</code> on the SD card. Both restore <b>admin / admin</b>.</p></div>
+      </div>
+      <div class="card group">
+        <h3>Backup and restore</h3>
+        <p class="gdesc">All settings in one file: picture, events, recording, MQTT, ONVIF, webhook, login and the HTTPS certificates. Use it after a reset or to set up a second camera.
+          <b>The file contains your passwords and private keys: keep it safe.</b></p>
+        <div class="rows">
+          <div class="row"><div class="rl"><div class="rt">Include Wi-Fi</div><div class="rd">Network name and password</div></div>
+            <div class="rc"><label class="sw"><input type="checkbox" id="bk_wifi" aria-label="Include Wi-Fi"><span></span></label></div></div>
+          <div class="row wrap"><div class="rl"><div class="rt">Restore</div><div class="rd">Replaces the settings with those in the file and restarts the camera</div></div>
+            <div class="rc"><input type="file" id="bk_file" accept=".tar,application/x-tar" style="max-width:220px"></div></div>
+        </div>
+        <div class="gfoot"><button id="bk_restore">Restore from file</button><button class="primary" id="bk_save">Download backup</button></div>
+      </div>
+      <div class="card group">
+        <div class="ghead"><h3>Development terminal</h3><span class="status" id="term_state"></span></div>
+        <p class="gdesc">A root shell on the camera, in the browser. Anyone logged in to this page can then run any command, so keep it off when you don't need it. Sessions are logged; one at a time.</p>
+        <div class="rows">
+          <div class="row"><div class="rl"><div class="rt">Allow the terminal</div></div>
+            <div class="rc"><label class="sw"><input type="checkbox" id="term_en" aria-label="Allow the development terminal"><span></span></label></div></div>
+        </div>
+        <div class="gfoot"><span class="muted" style="margin-right:auto">Opens in its own full-page tab. Opening it again takes over an older session.</span><button class="primary" id="term_open">Open terminal</button></div>
+      </div>
+    </div>
+  </section>
+</main>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+const $=s=>document.querySelector(s), $$=s=>document.querySelectorAll(s);
+/* ---- icons (inline SVG, no external requests) ---- */
+const ICONS={
+ cam:'<rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3z"/>',
+ play:'<path d="M7 4v16l13-8z"/>',pause:'<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
+ vol:'<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/>',
+ mute:'<path d="M11 5 6 9H2v6h4l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/>',
+ mic:'<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><path d="M12 18v4"/>',
+ max:'<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
+ download:'<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
+ copy:'<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+ check:'<path d="M20 6 9 17l-5-5"/>',
+ sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+ moon:'<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+ clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+ thermo:'<path d="M14 14.8V4a2 2 0 0 0-4 0v10.8a4 4 0 1 0 4 0z"/>',
+ wifi:'<path d="M2 9a15 15 0 0 1 20 0"/><path d="M5 12.6a10 10 0 0 1 14 0"/><path d="M8.5 16.1a5 5 0 0 1 7 0"/><path d="M12 20h.01"/>',
+ lock:'<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+ unlock:'<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.9-1"/>',
+ refresh:'<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>',
+ alert:'<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+ ext:'<path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+ image:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>'};
+function icon(el,name){el.outerHTML=`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]||""}</svg>`}
+function setIcon(btn,name){const s=btn.querySelector("svg.i");if(s)s.innerHTML=ICONS[name]}
+for(const el of $$("i[data-i]"))icon(el,el.dataset.i);
+
+/* ---- helpers ---- */
+const esc=t=>String(t).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let tt;
+function toast(m,err){const t=$("#toast");t.textContent=m;t.className="show"+(err?" err":"");clearTimeout(tt);tt=setTimeout(()=>t.className=err?"err":"",err?4000:2500)}
+async function post(url,data){
+  const r=await fetch(url,{method:"POST",headers:{"X-Requested-With":"lsc","Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(data||{})});
+  const t=(await r.text()).trim();
+  if(!r.ok)throw new Error(t||r.statusText);
+  return t;
+}
+const getJSON=async(u,retry=1)=>{let r;   // one retry after a dropped connection or 503
+  try{r=await fetch(u,{headers:{"X-Requested-With":"lsc"}})}catch(e){if(!retry)throw e;await new Promise(f=>setTimeout(f,400));return getJSON(u,0)}
+  if(r.status===503&&retry){await new Promise(f=>setTimeout(f,400));return getJSON(u,0)}
+  if(!r.ok)throw new Error(r.statusText);return r.json()};
+async function setParam(name,value,label){try{await post("/api/set",{name,value});toast((label||name.replace(/^\w+\./,""))+": "+value)}catch(e){toast(e.message,true)}}
+function setSeg(id,v){for(const b of $$("#"+id+" button"))b.classList.toggle("on",b.dataset.v===String(v))}
+function segVal(id,def){const b=$("#"+id+" button.on");return b?b.dataset.v:def}
+function dur(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`}
+function chip(id,text,cls){const c=$("#"+id);c.querySelector("span").textContent=text;c.classList.remove("ok","warn");if(cls)c.classList.add(cls);c.hidden=false}
+async function copyText(t){try{await navigator.clipboard.writeText(t);return true}catch(e){
+  const a=document.createElement("textarea");a.value=t;a.style.position="fixed";a.style.opacity="0";document.body.appendChild(a);a.select();
+  let ok=false;try{ok=document.execCommand("copy")}catch(_){}a.remove();return ok}}
+
+/* ---- tabs (remembered in the address: #image, #security, ...) ---- */
+const TABS=[...$$(".tabs button")].map(b=>b.dataset.tab);
+function showTab(name){
+  if(!TABS.includes(name))name="image";
+  for(const b of $$(".tabs button"))b.setAttribute("aria-selected",b.dataset.tab===name?"true":"false");
+  for(const p of $$(".tabpanel"))p.hidden=p.dataset.panel!==name;
+  if(name==="security")loadTls();
+  if(name==="system"){loadTime();loadMisc();loadTerm()}
+  if(name==="audio")loadMisc();
+  if(name==="events")loadEvents();
+  if(name==="integrations")loadIntegrations();
+  if(name==="recordings")loadRecordings();
+  if(name==="image"){loadImageExtra();loadQuality()}
+  if(typeof evPolling==="function")evPolling(name==="events"||name==="integrations");
+}
+for(const b of $$(".tabs button"))b.addEventListener("click",()=>{history.replaceState(null,"","#"+b.dataset.tab);showTab(b.dataset.tab)});
+addEventListener("hashchange",()=>{showTab(location.hash.slice(1));if(innerWidth<1040)$(".panel").scrollIntoView({behavior:"smooth"})});
+
+/* ---- header / connection ---- */
+$("#hostline").textContent=location.host;
+const secure=location.protocol==="https:";
+if(secure)chip("c_tls","HTTPS","ok");else{chip("c_tls","Not encrypted","warn");setIcon($("#c_tls"),"unlock")}
+$("#rtsp").textContent=`rtsp://${location.hostname}:554/`;
+$("#rtsps").textContent=`rtsps://${location.hostname}:322/`;
+for(const b of $$("[data-copy]"))b.addEventListener("click",async()=>{
+  const ok=await copyText($("#"+b.dataset.copy).textContent);toast(ok?"Address copied — use the camera login":"Copy failed",!ok);
+  if(ok){setIcon(b,"check");setTimeout(()=>setIcon(b,"copy"),1500)}});
+
+/* ---- image settings ---- */
+const SL=[["isp.brightness","Brightness"],["isp.contrast","Contrast"],["isp.saturation","Saturation"],["isp.sharpness","Sharpness"]];
+for(const[k,label]of SL){
+  const id=k.replace(".","_");
+  $("#sliders").insertAdjacentHTML("beforeend",`<div class="row wrap"><div class="rl"><div class="rt">${label}</div></div><div class="rc"><div class="slider"><input type="range" id="${id}" min="-50" max="50" step="1" value="0" aria-label="${label}"><span class="val" id="${id}_v">0</span></div></div></div>`);
+  const el=$("#"+id);
+  el.addEventListener("input",()=>$("#"+id+"_v").textContent=el.value);
+  el.addEventListener("change",()=>setParam(k,el.value,label));
+}
+function setOrient(f,m){for(const b of $$("#orient button"))b.classList.toggle("on",b.dataset.f===String(f)&&b.dataset.m===String(m))}
+for(const b of $$("#orient button"))b.addEventListener("click",async()=>{
+  try{await post("/api/set",{name:"image.flip",value:b.dataset.f});await post("/api/set",{name:"image.mirror",value:b.dataset.m});
+    setOrient(b.dataset.f,b.dataset.m);toast("Orientation: "+b.textContent);if(mode!=="live")setTimeout(snap,800)}catch(e){toast(e.message,true)}});
+for(const b of $$("#algo button"))b.addEventListener("click",async()=>{setSeg("algo",b.dataset.v);try{await cfgSet({"night.algo":b.dataset.v});toast("Automatic switching: "+b.textContent)}catch(e){toast(e.message,true)}});
+for(const b of $$("#mode button"))b.addEventListener("click",()=>{setSeg("mode",b.dataset.v);setParam("night.mode",b.dataset.v,"Day / night")});
+for(const b of $$("#ir button"))b.addEventListener("click",()=>{setSeg("ir",b.dataset.v);setParam("ir.mode",b.dataset.v,"Infrared lights")});
+$("#led").addEventListener("change",e=>setParam("led.status",e.target.checked?"on":"off","Status LED"));
+$("#fallback").addEventListener("change",e=>setParam("net.ap_fallback",e.target.checked?"on":"off","Access point fallback"));
+let params={};
+async function loadParams(){
+  const t=await (await fetch("/api/params")).text();
+  params={};for(const l of t.split("\n")){const i=l.indexOf("=");if(i>0)params[l.slice(0,i)]=l.slice(i+1)}
+  setSeg("mode",params["night.mode"]);setSeg("algo",params["night.algo"]||"stock");setSeg("ir",params["ir.mode"]);setOrient(params["image.flip"],params["image.mirror"]);
+  $("#led").checked=params["led.status"]==="on";
+  if(params["speaker.volume"]){$("#vol").value=params["speaker.volume"];$("#vol_v").textContent=params["speaker.volume"]}
+  for(const[k]of SL){const id=k.replace(".","_");if(params[k]!==undefined){$("#"+id).value=params[k];$("#"+id+"_v").textContent=params[k]}}
+  $("#ntp").value=params["time.ntp"]||"";
+}
+
+/* ---- status polling (one round every 15 s while the page is visible) ---- */
+let osdBase=null,osdMode="",osdFps="";
+async function refresh(){
+  if(document.hidden)return;
+  try{
+    const [s,h,w]=await Promise.all([getJSON("/api/status"),getJSON("/api/health"),getJSON("/api/wifi")]);
+    if(s.name){$(".name").textContent=s.name;document.title=s.name}
+    const night=s.night==="night";
+    chip("c_mode",night?"Night":"Day");setIcon($("#c_mode"),night?"moon":"sun");
+    chip("c_up",dur(s.uptime_s));if(s.fps)osdFps=s.fps+" FPS";
+    $("#lightnow").textContent=s.light>=0?`Light now: ${s.light} %`+(s.non_ir>=0?`, ${s.non_ir} % of the picture in colour.`:"."):"";
+    if(h.temp_c!==null&&h.temp_c!==undefined)chip("c_temp",h.temp_c+" °C");
+    chip("c_wifi",w.mode==="ap"?"Access point":(w.rssi_dbm?w.rssi_dbm+" dBm":"—"));
+    $("#defwarn").hidden=!s.default_login;$("#httpwarn").hidden=secure;
+    if(!$("#user").value)$("#user").value=s.user;
+    $("#health").innerHTML=[["Uptime",dur(h.uptime_s)],["Load",h.load.toFixed(2)],["Memory free",Math.round(h.mem_avail_kb/1024)+" of "+Math.round(h.mem_total_kb/1024)+" MB"],
+      ["Temperature",h.temp_c==null?"n/a":h.temp_c+" °C"],["Light level",s.light>=0?s.light+" %":"n/a"],["Wi-Fi",w.mode==="ap"?"access point":(w.ssid||"—")],["Signal",w.rssi_dbm?w.rssi_dbm+" dBm":"n/a"],
+      ["Address",w.ip||"—"],["MAC",w.mac||"—"],["RTSP sessions",String(h.rtsp_client||0)],["Clock",h.time.synced?"synced":"not synced"],
+      ["Last crash",h.last_crash?(h.last_crash_time?h.last_crash_time+" · ":"")+h.last_crash:"none recorded"]]
+      .map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+    $("#spkstat").textContent=h.speaker?"Working":"Not available";$("#spkstat").className="status"+(h.speaker?" ok":"");
+    $("#clock").textContent=h.time.local+" · "+h.time.tz+(h.time.synced?"":" · not synced yet");
+    $("#wifistat").textContent=w.mode==="ap"?`Access point ${w.ap_ssid} active, ${Math.ceil(w.ap_seconds_left/60)} min left`:`Connected to ${w.ssid||"—"} · ${w.ip||"no address"} · ${w.rssi_dbm||"?"} dBm`;
+    $("#wifilast").textContent=(w.qr_seconds_left?`Looking for a Wi-Fi QR code (${w.qr_seconds_left} s left). `:"")+(w.last||"");
+    $("#apname").textContent=w.ap_ssid||"LSC-Camera";$("#fallback").checked=!!w.fallback;$("#apsec").hidden=!w.ap_supported;
+    const m=/^(\d+)-(\d+)-(\d+) (\d+):(\d+):(\d+)$/.exec(h.time.local);
+    if(m)osdBase={t:Date.UTC(+m[1],m[2]-1,+m[3],+m[4],+m[5],+m[6]),at:Date.now()};
+    osdMode=(night?"NIGHT":"DAY")+(h.time.synced?"":" (clock not set)");osdTick();
+  }catch(e){}
+}
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)refresh()});
+
+/* ---- time ---- */
+let tzLoaded=false;
+async function loadTime(){
+  if(tzLoaded)return;
+  try{const tz=await getJSON("/api/tz");$("#tz").innerHTML=tz.map(z=>`<option>${esc(z)}</option>`).join("");tzLoaded=true;if(params["time.tz"])$("#tz").value=params["time.tz"]}catch(e){}
+}
+$("#timesave").addEventListener("click",async()=>{try{await post("/api/set",{name:"time.ntp",value:$("#ntp").value.trim()||"pool.ntp.org"});await post("/api/set",{name:"time.tz",value:$("#tz").value});
+  params["time.tz"]=$("#tz").value;toast("Time settings saved");setTimeout(refresh,1500)}catch(e){toast(e.message,true)}});
+
+/* ---- login / system ---- */
+$("#cred").addEventListener("submit",async e=>{
+  e.preventDefault();
+  if($("#p1").value!==$("#p2").value){toast("The new passwords do not match",true);return}
+  try{await post("/api/credentials",{current:$("#cur").value,user:$("#user").value,pass:$("#p1").value});
+    toast("Login changed — please log in again");setTimeout(()=>location.reload(),1500)}catch(err){toast(err.message,true)}});
+$("#reboot").addEventListener("click",async()=>{if(!confirm("Reboot the camera?"))return;try{await post("/api/reboot");toast("Rebooting — back in about a minute")}catch(e){toast(e.message,true)}});
+$("#resetset").addEventListener("click",async()=>{if(!confirm("Reset image and day/night settings to their defaults and reboot?"))return;try{await post("/api/reset-settings");toast("Settings reset, rebooting")}catch(e){toast(e.message,true)}});
+/* ---- backup / restore ---- */
+$("#bk_save").addEventListener("click",async()=>{
+  try{const r=await fetch("/api/backup",{method:"POST",headers:{"X-Requested-With":"lsc","Content-Type":"application/x-www-form-urlencoded"},
+      body:new URLSearchParams({wifi:$("#bk_wifi").checked?"1":"0"})});
+    if(!r.ok)throw new Error((await r.text()).trim()||r.statusText);
+    const cd=r.headers.get("Content-Disposition")||"",m=/filename="([^"]+)"/.exec(cd);
+    const a=document.createElement("a");a.href=URL.createObjectURL(await r.blob());a.download=m?m[1]:"camera-backup.tar";
+    document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);toast("Backup downloaded")}
+  catch(e){toast(e.message,true)}});
+$("#bk_restore").addEventListener("click",async()=>{const f=$("#bk_file").files[0];
+  if(!f){toast("Choose a backup file first",true);return}
+  if(!confirm(`Restore the settings from ${f.name}? The current settings are replaced and the camera restarts.`))return;
+  try{const r=await fetch("/api/restore",{method:"POST",headers:{"X-Requested-With":"lsc","Content-Type":"application/x-tar"},body:await f.arrayBuffer()});
+    const t=(await r.text()).trim();if(!r.ok)throw new Error(t||r.statusText);toast(t)}catch(e){toast(e.message,true)}});
+
+/* ---- development terminal (full page: /terminal) ---- */
+function termState(){const on=$("#term_en").checked,s=$("#term_state");s.textContent=on?"Allowed":"Off";s.className="status"+(on?" warn":"")}
+$("#term_open").addEventListener("click",()=>{if(!$("#term_en").checked){toast("Allow the terminal first",true);return}window.open("/terminal","_blank")});
+$("#term_en").addEventListener("change",async()=>{const on=$("#term_en").checked;
+  if(on&&!confirm("Allow a root shell from this page? Anyone with the login can then run any command on the camera.")){$("#term_en").checked=false;return}
+  try{await cfgSet({"dev.terminal":onoff(on)});termState();toast("Development terminal "+(on?"allowed":"off"))}catch(e){toast(e.message,true)}});
+async function loadTerm(){try{const c=await cfgGet("dev.");$("#term_en").checked=c["dev.terminal"]==="on";termState()}catch(e){}}
+
+/* ---- Wi-Fi ---- */
+$("#scan").addEventListener("click",async()=>{const b=$("#scan");b.disabled=true;b.querySelector("span").textContent="Scanning…";
+  try{const n=await getJSON("/api/wifi/scan");const seen=new Set();
+    $("#nets").innerHTML=n.sort((a,b)=>b.signal-a.signal).filter(x=>x.ssid&&!seen.has(x.ssid)&&seen.add(x.ssid)).map(x=>
+      `<button type="button" data-ssid="${esc(x.ssid)}"><span>${esc(x.ssid)}</span><span class="sig">${x.secured?'<i data-i="lock"></i>':""}${x.signal} dBm</span></button>`).join("")||'<p class="muted">No networks found.</p>';
+    for(const el of $$("#nets i[data-i]"))icon(el,el.dataset.i);
+    for(const e of $$("#nets button"))e.addEventListener("click",()=>{$("#ssid").value=e.dataset.ssid;$("#psk").focus()});
+  }catch(e){toast("Scan failed",true)}b.disabled=false;b.querySelector("span").textContent="Scan"});
+$("#wifi").addEventListener("submit",async e=>{e.preventDefault();
+  if(!confirm(`Switch the camera to “${$("#ssid").value}”? On a different network it gets a new address.`))return;
+  try{toast(await post("/api/wifi/connect",{ssid:$("#ssid").value,psk:$("#psk").value}));$("#psk").value="";setTimeout(refresh,5000)}catch(err){toast(err.message,true)}});
+$("#apsave").addEventListener("click",async()=>{try{await post("/api/ap/password",{password:$("#appass").value});$("#appass").value="";toast("Access point password saved")}catch(e){toast(e.message,true)}});
+$("#apstart").addEventListener("click",async()=>{if(!confirm("Start the access point now? The camera leaves your Wi-Fi for 15 minutes."))return;try{toast(await post("/api/ap/start",{minutes:"15"}))}catch(e){toast(e.message,true)}});
+$("#qrstart").addEventListener("click",async()=>{try{toast(await post("/api/wifi/qr",{seconds:"180"}))}catch(e){toast(e.message,true)}});
+
+/* ---- HTTPS ---- */
+async function loadTls(){
+  try{const t=await getJSON("/api/tls");
+    const st=$("#tls_state");
+    st.textContent=t.ready?(secure?"Active · you are on HTTPS":"Active on port 443"):(t.error||"Starting…");st.className="status"+(t.ready?" ok":" warn");
+    $("#tls_ca").textContent=(t.ca_name||"").replace(/^CN=/,"").replace(/, O=.*/,"")||"—";
+    const hex=h=>(h||"").toUpperCase().match(/.{2}/g)?.join(":")||"—";
+    $("#tls_fp").textContent=hex(t.ca_sha256);$("#tls_srv_fp").textContent=hex(t.srv_sha256);
+    $("#tls_ca_spki").textContent=t.ca_spki?"sha256//"+t.ca_spki:"—";$("#tls_srv_spki").textContent=t.srv_spki?"sha256//"+t.srv_spki:"—";
+    const cov=[...(t.names?t.names.split(","):[]),...(t.ips?t.ips.split(","):[])];
+    $("#tls_cov").textContent=(cov.join(", ")||"—")+(t.not_after?` · valid until ${t.not_after}, renewed automatically`:"");
+    try{const c=await cfgGet("web.");if(document.activeElement!==$("#web_hosts"))$("#web_hosts").value=c["web.hosts"]||"";
+      if(document.activeElement!==$("#web_proxies"))$("#web_proxies").value=c["web.proxies"]||""}catch(e){}
+    if(document.activeElement!==$("#tls_names"))$("#tls_names").value=(t.names||"").split(",").filter(x=>x).join(", ");
+    $("#tls_redirect").checked=!!t.redirect;
+    const o=$("#tls_open");o.hidden=secure||!t.ready;o.href=`https://${location.hostname}/`;
+  }catch(e){$("#tls_state").textContent="Unavailable";$("#tls_state").className="status warn"}
+}
+$("#tls_save").addEventListener("click",async()=>{
+  try{await cfgSet({"web.hosts":$("#web_hosts").value.trim(),"web.proxies":$("#web_proxies").value.trim()});await post("/api/tls",{names:$("#tls_names").value,redirect:$("#tls_redirect").checked?"1":"0"});toast("HTTPS settings saved");loadTls()}catch(e){toast(e.message,true)}});
+$("#tls_newca").addEventListener("click",async()=>{
+  if(!confirm("Create a new certificate authority? Every device that trusts the current one must install the new certificate."))return;
+  try{await post("/api/tls/regenerate-ca");toast("New CA created — download and install it again");loadTls()}catch(e){toast(e.message,true)}});
+
+/* ---- sound + webhook ---- */
+for(const b of $$("[data-snd]"))b.addEventListener("click",async()=>{try{await post("/api/sound/play",{name:b.dataset.snd});toast("Playing: "+b.textContent)}catch(e){toast(e.message,true)}});
+$("#vol").addEventListener("input",()=>$("#vol_v").textContent=$("#vol").value);
+$("#vol").addEventListener("change",()=>setParam("speaker.volume",$("#vol").value,"Volume"));
+function hookShow(t){$("#hooktok").textContent=t;$("#hookex").hidden=false;
+  const base=location.origin+"/hook/sound";
+  $("#hookex1").textContent=`curl -X POST -H "Authorization: Bearer ${t}" "${base}?name=chime"`;
+  $("#hookex2").textContent=`curl -X POST -H "Authorization: Bearer ${t}" -H "Content-Type: audio/wav" --data-binary @sound.wav ${base}`}
+$("#hookshow").addEventListener("click",async()=>{try{hookShow((await getJSON("/api/hook/token")).token)}catch(e){toast("Cannot read the token",true)}});
+$("#hooknew").addEventListener("click",async()=>{if(!confirm("Create a new webhook token? Automations using the old one stop working."))return;
+  try{const r=await fetch("/api/hook/token",{method:"POST",headers:{"X-Requested-With":"lsc"}});hookShow((await r.json()).token);toast("New token created")}catch(e){toast(e.message,true)}});
+
+/* ---- overlay ---- */
+let osdCfg={enabled:false,show_time:true,show_mode:true,show_fps:false,prefix:"",suffix:"",pos:"tl",size:2};   // nothing drawn until /api/osd answers
+let webOsd=true;
+const OSD_STATE={on:["In the video","ok"],off:["Off",""],starting:["Starting",""],guard:["Skipped after an incomplete start — save to retry on reboot","warn"],
+  error:["Video overlay unavailable — shown in the browser only","warn"],disabled:["Disabled by SD card (no_osd)","warn"]};
+function osdTick(){
+  const o=$("#osd"),burned=["on","off","starting"].includes(osdCfg.video);
+  o.hidden=!webOsd||!osdCfg.enabled||burned;o.className="osd "+osdCfg.pos;if(o.hidden)return;
+  const p=n=>String(n).padStart(2,"0");let ts="";
+  if(osdBase&&osdCfg.show_time){const t=new Date(osdBase.t+(Date.now()-osdBase.at));
+    ts=`${t.getUTCFullYear()}-${p(t.getUTCMonth()+1)}-${p(t.getUTCDate())} ${p(t.getUTCHours())}:${p(t.getUTCMinutes())}:${p(t.getUTCSeconds())}`}
+  const parts=[osdCfg.prefix,ts,osdCfg.show_mode?osdMode:"",osdCfg.show_fps?osdFps:"",osdCfg.suffix].filter(x=>x);
+  o.textContent=parts.join("  ");o.hidden=!parts.length}
+function osdForm(c){const s=OSD_STATE[c.video]||["",""];$("#osd_state").textContent=s[0];$("#osd_state").className="status"+(s[1]?" "+s[1]:"");$("#osd_state").hidden=!s[0];
+  $("#osd_en").checked=c.enabled;$("#osd_time").checked=c.show_time;$("#osd_mode").checked=c.show_mode;$("#osd_fps").checked=!!c.show_fps;
+  $("#osd_pre").value=c.prefix;$("#osd_suf").value=c.suffix;setSeg("osd_pos",c.pos);setSeg("osd_size",c.size||2)}
+async function osdLoad(){
+  try{const c=await cfgGet("web.overlay");webOsd=c["web.overlay"]!=="off";$("#web_osd").checked=webOsd}catch(e){}
+  try{osdCfg=await getJSON("/api/osd");osdForm(osdCfg);osdTick()}catch(e){}}
+$("#web_osd").addEventListener("change",async e=>{const on=e.target.checked;
+  try{await cfgSet({"web.overlay":on?"on":"off"});webOsd=on;osdTick();toast("Page overlay "+(on?"on":"off"))}catch(err){e.target.checked=!on;toast(err.message,true)}});
+for(const id of["osd_pos","osd_size"])for(const b of $$("#"+id+" button"))b.addEventListener("click",()=>setSeg(id,b.dataset.v));
+$("#osd_save").addEventListener("click",async()=>{
+  try{const r=await fetch("/api/osd",{method:"POST",headers:{"X-Requested-With":"lsc","Content-Type":"application/x-www-form-urlencoded"},
+      body:new URLSearchParams({enabled:$("#osd_en").checked?"1":"0",show_time:$("#osd_time").checked?"1":"0",show_mode:$("#osd_mode").checked?"1":"0",show_fps:$("#osd_fps").checked?"1":"0",
+        prefix:$("#osd_pre").value,suffix:$("#osd_suf").value,pos:segVal("osd_pos","tl"),size:segVal("osd_size","2")})});
+    if(!r.ok)throw new Error((await r.text()).trim());osdCfg=await r.json();osdForm(osdCfg);osdTick();toast("Overlay saved")}catch(e){toast(e.message,true)}});
+
+/* ---- Live video: H.264 over WebSocket -> fragmented MP4 -> Media Source ---- */
+const Live=(()=>{
+  const u8=(...a)=>new Uint8Array(a);
+  const u32=v=>u8(v>>>24&255,v>>>16&255,v>>>8&255,v&255), u16=v=>u8(v>>8&255,v&255);
+  const cat=parts=>{let n=0;for(const p of parts)n+=p.length;const o=new Uint8Array(n);let i=0;for(const p of parts){o.set(p,i);i+=p.length}return o};
+  const str=t=>Uint8Array.from(t,c=>c.charCodeAt(0));
+  const box=(type,...parts)=>{const b=cat(parts);return cat([u32(b.length+8),str(type),b])};
+  const full=(type,ver,flags,...parts)=>box(type,u8(ver,flags>>16&255,flags>>8&255,flags&255),...parts);
+  const zeros=n=>new Uint8Array(n);
+  const MATRIX=cat([u32(0x10000),u32(0),u32(0),u32(0),u32(0x10000),u32(0),u32(0),u32(0),u32(0x40000000)]);
+  function nals(b){            // split Annex-B into NAL units
+    const out=[];let i=0,start=-1;
+    while(i+2<b.length){
+      if(b[i]===0&&b[i+1]===0&&(b[i+2]===1||(b[i+2]===0&&i+3<b.length&&b[i+3]===1))){
+        const sc=b[i+2]===1?3:4; if(start>=0)out.push(b.subarray(start,i)); i+=sc; start=i; continue }
+      i++ }
+    if(start>=0&&start<b.length)out.push(b.subarray(start));
+    return out.filter(n=>n.length)
+  }
+  function spsInfo(sps){       // width/height from SPS (exp-Golomb), fallback 1920x1080
+    try{
+      const r=[];for(let i=1;i<sps.length;i++){if(i>2&&sps[i]===3&&sps[i-1]===0&&sps[i-2]===0)continue;r.push(sps[i])}
+      let bit=0;const b=()=>(r[bit>>3]>>(7-(bit++&7)))&1,bits=n=>{let v=0;while(n--)v=v*2+b();return v},
+        ue=()=>{let z=0;while(!b()&&z<32)z++;return (1<<z)-1+bits(z)},se=()=>{const v=ue();return v&1?(v+1)/2:-v/2};
+      const prof=bits(8);bits(16);ue();let cf=1;
+      if([100,110,122,244,44,83,86,118,128].includes(prof)){cf=ue();if(cf===3)b();ue();ue();b();if(b())for(let i=0;i<(cf!==3?8:12);i++)if(b()){let l=8,n=8;for(let j=0;j<(i<6?16:64);j++){if(n)n=(l+se()+256)%256;l=n||l}}}
+      ue();const poc=ue();if(poc===0)ue();else if(poc===1){b();se();se();const c=ue();for(let i=0;i<c;i++)se()}
+      ue();b();const w=ue()+1,h=ue()+1,fmo=b();if(!fmo)b();b();
+      let cl=0,cr=0,ct=0,cb=0;if(b()){cl=ue();cr=ue();ct=ue();cb=ue()}
+      const sx=cf===0||cf===3?1:2,sy=(cf===1?2:1)*(2-fmo);
+      return {w:w*16-sx*(cl+cr),h:(2-fmo)*h*16-sy*(ct+cb)}
+    }catch(e){return {w:1920,h:1080}}
+  }
+  function initSeg(sps,pps,w,h){
+    const avcC=box("avcC",u8(1,sps[1],sps[2],sps[3],0xff,0xe1),u16(sps.length),sps,u8(1),u16(pps.length),pps);
+    const avc1=box("avc1",zeros(6),u16(1),zeros(16),u16(w),u16(h),u32(0x480000),u32(0x480000),zeros(4),u16(1),zeros(32),u16(0x18),u16(0xffff),avcC);
+    const stbl=box("stbl",full("stsd",0,0,u32(1),avc1),full("stts",0,0,u32(0)),full("stsc",0,0,u32(0)),full("stsz",0,0,u32(0),u32(0)),full("stco",0,0,u32(0)));
+    const minf=box("minf",full("vmhd",0,1,zeros(8)),box("dinf",full("dref",0,0,u32(1),full("url ",0,1))),stbl);
+    const mdia=box("mdia",full("mdhd",0,0,u32(0),u32(0),u32(90000),u32(0),u16(0x55c4),u16(0)),full("hdlr",0,0,u32(0),str("vide"),zeros(12),str("VideoHandler\0")),minf);
+    const trak=box("trak",full("tkhd",0,3,u32(0),u32(0),u32(1),u32(0),u32(0),zeros(8),u16(0),u16(0),u16(0),u16(0),MATRIX,u32(w<<16),u32(h<<16)),mdia);
+    const moov=box("moov",full("mvhd",0,0,u32(0),u32(0),u32(90000),u32(0),u32(0x10000),u16(0x100),zeros(10),MATRIX,zeros(24),u32(2)),trak,box("mvex",full("trex",0,0,u32(1),u32(1),u32(0),u32(0),u32(0))));
+    return cat([box("ftyp",str("isom"),u32(0x200),str("isomiso2avc1mp41")),moov])
+  }
+  function mediaSeg(seq,dts,dur,key,sample){
+    const trun=()=>full("trun",0,0x000701,u32(1),u32(0),u32(dur),u32(sample.length),u32(key?0x02000000:0x01010000));
+    const traf=()=>box("traf",full("tfhd",0,0x020000,u32(1)),full("tfdt",1,0,u32(Math.floor(dts/4294967296)),u32(dts>>>0)),trun());
+    let moof=box("moof",full("mfhd",0,0,u32(seq)),traf());
+    const off=moof.length+8;  // patch trun data_offset (moof|mfhd|traf|tfhd|tfdt|trun header)
+    const v=new DataView(moof.buffer,moof.byteOffset);const p=moof.length-12;v.setUint32(p-4+0,off);
+    return cat([moof,u32(sample.length+8),str("mdat"),sample])
+  }
+  let ws,ms,sb,queue=[],seq=0,t0=null,lastTs=0,dts=0,ready=false,frames=0,onStat=()=>{},onEnd=()=>{};
+  function feed(seg){queue.push(seg);pump()}
+  function pump(){
+    if(!sb||sb.updating||!queue.length)return;
+    try{sb.appendBuffer(queue.shift())}catch(e){onStat("Player error: "+e.name);stop()}
+  }
+  let actx=null,anext=0,soundOn=false;
+  function onAudio(d){
+    if(!soundOn||!actx)return;
+    const n=(d.length-9)>>1;if(n<=0)return;
+    const b=actx.createBuffer(1,n,8000),ch=b.getChannelData(0),dv=new DataView(d.buffer,d.byteOffset+9,n*2);
+    for(let i=0;i<n;i++)ch[i]=dv.getInt16(i*2,true)/32768;
+    const now=actx.currentTime;if(anext<now+0.05||anext>now+0.6)anext=now+0.15;   // jitter buffer, resync on drift
+    const src=actx.createBufferSource();src.buffer=b;src.connect(actx.destination);src.start(anext);anext+=n/8000;
+  }
+  function setSound(on){
+    soundOn=on;
+    if(on){if(!actx){try{actx=new AudioContext({sampleRate:8000})}catch(e){actx=new AudioContext()}}actx.resume();anext=0}
+    else if(actx){actx.suspend()}
+    return soundOn
+  }
+  function onFrame(buf){
+    const d=new Uint8Array(buf);if(d.length<10)return;
+    if(d[0]&2){onAudio(d);return}
+    const key=d[0]&1, ts=Number(new DataView(buf).getBigUint64(1)), units=nals(d.subarray(9));
+    if(!ready){
+      if(!key)return;
+      const sps=units.find(n=>(n[0]&31)===7),pps=units.find(n=>(n[0]&31)===8);if(!sps||!pps)return;
+      const {w,h}=spsInfo(sps), codec="avc1."+[sps[1],sps[2],sps[3]].map(x=>x.toString(16).padStart(2,"0")).join("");
+      if(!window.MediaSource||!MediaSource.isTypeSupported('video/mp4; codecs="'+codec+'"')){onStat("This browser cannot play the live stream; showing snapshots",true);stop();onEnd();return}
+      sb=ms.addSourceBuffer('video/mp4; codecs="'+codec+'"');
+      sb.addEventListener("updateend",()=>{const v=$("#live"),b=sb.buffered;
+        if(b.length){const end=b.end(b.length-1);if(end-v.currentTime>1.5)v.currentTime=end-0.3;if(v.currentTime-b.start(0)>30&&!sb.updating){sb.remove(0,v.currentTime-10);return}}
+        pump()});
+      feed(initSeg(sps,pps,w,h));ready=true;t0=ts;lastTs=ts;onStat(`${w}×${h}`,false,true);
+    }
+    const sample=cat(units.filter(n=>{const t=n[0]&31;return t!==7&&t!==8&&t!==9}).flatMap(n=>[u32(n.length),n]));
+    let dur=Math.round((ts-lastTs)*90);if(dur<=0||dur>90000)dur=6000;
+    dts=Math.round((ts-t0)*90);lastTs=ts;
+    feed(mediaSeg(++seq,dts,dur,key,sample));frames++;
+    const v=$("#live");if(v.paused)v.play().catch(()=>{});
+  }
+  async function start(stat,end){
+    onStat=stat;onEnd=end||(()=>{});stop();
+    const r=await fetch("/api/live/token",{headers:{"X-Requested-With":"lsc"}});if(!r.ok){stat("Live view not available",true);return false}
+    const {token}=await r.json();
+    ms=new MediaSource();const v=$("#live");v.src=URL.createObjectURL(ms);
+    await new Promise(res=>ms.addEventListener("sourceopen",res,{once:true}));
+    ws=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/api/live?t="+token);
+    ws.binaryType="arraybuffer";
+    ws.onmessage=e=>onFrame(e.data);
+    ws.onclose=()=>{if(ws){stat(frames?"Live view stopped":"Live view refused (too many viewers?)",true);onEnd()}};
+    stat("Connecting…");return true
+  }
+  function stop(){const w=ws;ws=null;if(w)try{w.close()}catch(e){};sb=null;queue=[];seq=0;ready=false;frames=0;t0=null}
+  function send(buf){if(ws&&ws.readyState===1&&ready){ws.send(buf);return true}return false}
+  return {start,stop,setSound,send,stats:()=>({frames,ready})}
+})();
+
+/* modes: "live" (video), "paused" (still), "snap" (live unavailable: snapshot every 2 s) */
+let mode="",snapTimer=null,snapUrl=null;
+function badge(text,live){$("#badgetxt").textContent=text;$("#badge").classList.toggle("live",!!live)}
+async function snap(){
+  try{const r=await fetch("/snapshot.jpg");if(!r.ok)throw 0;const b=await r.blob();
+    if(snapUrl)URL.revokeObjectURL(snapUrl);snapUrl=URL.createObjectURL(b);$("#snap").src=snapUrl}catch(e){}
+}
+function setMode(m){
+  mode=m;const live=m==="live";
+  $("#live").hidden=!live;$("#snap").hidden=live;$("#refresh").hidden=live;
+  const b=$("#livebtn");setIcon(b,live?"pause":"play");b.querySelector("span").textContent=live?"Pause":"Play";
+  clearInterval(snapTimer);snapTimer=null;
+  if(m==="snap"){badge("Snapshot");snap();snapTimer=setInterval(()=>{if(!document.hidden)snap()},2000)}
+  if(m==="paused"){badge("Paused");snap()}
+}
+async function goLive(){
+  setMode("live");badge("Connecting");
+  const ok=await Live.start((t,err,isLive)=>{$("#livestat").textContent=err?t:"";if(isLive)badge("Live · "+t,true)},()=>{if(mode==="live")setMode("snap")}).catch(()=>false);
+  if(!ok)setMode("snap");
+}
+$("#livebtn").addEventListener("click",()=>{if(mode==="live"){Live.stop();setMode("paused")}else goLive()});
+$("#refresh").addEventListener("click",snap);
+$("#soundbtn").addEventListener("click",()=>{const b=$("#soundbtn"),on=Live.setSound(b.dataset.on!=="1");b.dataset.on=on?"1":"0";
+  setIcon(b,on?"vol":"mute");b.querySelector("span").textContent=on?"Sound on":"Sound off";b.classList.toggle("active",on)});
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden&&mode==="live"){Live.stop();mode="hidden";badge("Paused")}
+  else if(!document.hidden&&mode==="hidden")goLive()});
+$("#fsbtn").addEventListener("click",()=>{const v=$("#vbox");
+  if(document.fullscreenElement)document.exitFullscreen();
+  else if(v.requestFullscreen)v.requestFullscreen().catch(()=>{});
+  else if($("#live").webkitEnterFullscreen)$("#live").webkitEnterFullscreen()});
+$("#shotbtn").addEventListener("click",async()=>{
+  const p=n=>String(n).padStart(2,"0"),d=new Date(),name=`camera-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.jpg`;
+  const save=b=>{const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)};
+  const v=$("#live");
+  if(mode==="live"&&v.videoWidth){const c=document.createElement("canvas");c.width=v.videoWidth;c.height=v.videoHeight;
+    c.getContext("2d").drawImage(v,0,0);c.toBlob(b=>b?save(b):toast("Snapshot failed",true),"image/jpeg",0.92);return}
+  try{const r=await fetch("/snapshot.jpg");if(!r.ok)throw 0;save(await r.blob())}catch(e){toast("Snapshot failed",true)}});
+
+/* ---- talk-back: microphone -> 8 kHz s16le -> WebSocket -> camera speaker ----
+ * Hold the button to talk, or click it once to start and again to stop.
+ * The AudioContext is created inside the click (browsers keep contexts made
+ * later suspended), and pointer capture keeps the press alive while the
+ * browser shows its microphone permission prompt. */
+const Talk=(()=>{
+  let ctx=null,stream=null,node=null,src=null,gen=0,sent=0,level=0,acc=0,accN=0,pos=0,gain=1,gate=0.1,env=0,raw=0,label="";
+  function stop(){gen++;try{node&&node.disconnect();src&&src.disconnect();stream&&stream.getTracks().forEach(t=>t.stop());ctx&&ctx.close()}catch(e){}
+    node=src=stream=ctx=null;level=0}
+  async function start(){                       // must be called from the click/press handler
+    stop();const my=++gen;sent=0;pos=0;acc=0;accN=0;
+    ctx=new (window.AudioContext||window.webkitAudioContext)();ctx.resume&&ctx.resume();
+    const s=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:false}});
+    if(my!==gen){s.getTracks().forEach(t=>t.stop());return false}   // released before the mic opened
+    stream=s;if(ctx.state!=="running")await ctx.resume();
+    const tr=s.getAudioTracks()[0];label=tr&&tr.label||"microphone";gain=1;env=0;raw=0;
+    const ratio=ctx.sampleRate/8000;
+    src=ctx.createMediaStreamSource(stream);node=ctx.createScriptProcessor(2048,1,1);
+    /* band-limit before going to 8 kHz: 4th-order low-pass at 3.4 kHz (no
+     * aliasing hiss) and a high-pass at 200 Hz (the camera speaker can't play
+     * lower; it only eats headroom) */
+    const bq=(type,f)=>{const b=ctx.createBiquadFilter();b.type=type;b.frequency.value=f;b.Q.value=0.707;return b};
+    const chain=[bq("highpass",200),bq("lowpass",3400),bq("lowpass",3400)];
+    node.onaudioprocess=e=>{
+      const inp=e.inputBuffer.getChannelData(0),out=[];let sq=0;
+      for(let i=0;i<inp.length;i++){acc+=inp[i];accN++;pos+=1;          // average over each 1/8000 s (anti-alias)
+        if(pos>=ratio){pos-=ratio;const v=acc/accN;acc=0;accN=0;out.push(v);sq+=v*v}}
+      /* level control: some browsers (Firefox) deliver speech far quieter
+       * than others; bring it to ~-16 dBFS, up to x8, without lifting
+       * background noise (gate at -50 dBFS); attack fast, release slow */
+      const rms=Math.sqrt(sq/Math.max(1,out.length));raw=Math.max(rms,raw*0.9);
+      env=rms>env?env*0.5+rms*0.5:env*0.97+rms*0.03;
+      /* no big boost: an open phone mic would lift the camera speaker heard from
+       * across the house and send it back to it (Larsen through the phone, out
+       * of reach of any echo canceller). Gate: only sound close to the mic
+       * (speech, > -42 dBFS) passes at full level, the rest -20 dB. */
+      if(env>0.003){const want=Math.min(2.5,Math.max(0.5,0.16/env));gain+=(want-gain)*(want<gain?0.5:0.05)}
+      gate=env>0.008?Math.min(1,gate+0.5):Math.max(0.1,gate*0.85);
+      let pk=0;
+      const pcm=new Int16Array(out.length);for(let i=0;i<out.length;i++){const x=out[i]*gain*gate,a=Math.abs(x),     // soft limiter, never hard clipping
+        v=a<0.9?x:Math.sign(x)*(0.9+0.1*Math.tanh((a-0.9)/0.1));if(Math.abs(v)>pk)pk=Math.abs(v);pcm[i]=Math.round(v*32000)}
+      level=Math.max(pk,level*0.8);
+      if(Live.send(pcm.buffer))sent+=pcm.length;
+      e.outputBuffer.getChannelData(0).fill(0);
+    };
+    let n=src;for(const f of chain){n.connect(f);n=f}n.connect(node);node.connect(ctx.destination);
+    return true
+  }
+  return {start,stop,stats:()=>({sent,level,raw,gain,label})}
+})();
+if(window.isSecureContext&&navigator.mediaDevices&&navigator.mediaDevices.getUserMedia){$("#talkbtn").hidden=false;$("#talkhint").hidden=true}
+let talking=false,talkSticky=false,talkDownAt=0,talkTimer=null;
+function talkUi(on,label){const b=$("#talkbtn");b.classList.toggle("active",on);b.querySelector("span").textContent=label||(on?"Talking…":"Hold to talk");
+  $("#vu").hidden=!on;if(!on){$("#vufill").style.width="0";$("#vulabel").textContent=""}}
+function vuShow(st){   // level in dBFS, -48..0 over the bar
+  const db=st.level>0?20*Math.log10(st.level):-99;$("#vufill").style.width=Math.max(0,Math.min(100,(db+48)/48*100))+"%";
+  $("#vulabel").textContent=st.label;$("#vu").title=`${st.label} · boost ×${st.gain.toFixed(1)}`}
+async function talkBegin(){
+  if(talking)return;
+  if(mode!=="live"){toast("Start the live view first",true);return}
+  talking=true;talkUi(true,"Opening mic…");
+  const s=$("#soundbtn");$("#talkbtn").dataset.restore=s.dataset.on==="1"?"1":"0";if(s.dataset.on==="1")Live.setSound(false);   // avoid echo
+  try{
+    const ok=await Talk.start();
+    if(!ok||!talking)return;
+    talkUi(true,talkSticky?"Talking — click to stop":"Talking…");
+    const t0=Date.now();let loudSeen=false,warned=false;
+    clearInterval(talkTimer);talkTimer=setInterval(()=>{const st=Talk.stats();vuShow(st);
+      if(st.raw>0.003)loudSeen=true;
+      if(Date.now()-t0>2000&&st.sent===0){toast("No audio is reaching the camera (is the live view connected?)",true);talkEnd()}
+      else if(Date.now()-t0>3000&&!loudSeen&&!warned){warned=true;toast(`“${st.label}” is silent — check which microphone the browser uses and that it isn't muted`,true)}},80);
+  }catch(err){
+    const m=err&&err.name==="NotAllowedError"?"Microphone blocked — allow it for this site in the browser":"Microphone: "+(err&&err.message||err);
+    toast(m,true);talkEnd()}
+}
+function talkEnd(){
+  if(!talking)return;talking=false;talkSticky=false;clearInterval(talkTimer);Talk.stop();talkUi(false);
+  if($("#talkbtn").dataset.restore==="1")Live.setSound(true)}
+const tb=$("#talkbtn");
+tb.addEventListener("pointerdown",e=>{e.preventDefault();try{tb.setPointerCapture(e.pointerId)}catch(_){}
+  if(talking&&talkSticky){talkEnd();return}
+  talkDownAt=Date.now();talkBegin()});
+tb.addEventListener("pointerup",()=>{if(!talking||talkSticky)return;
+  if(Date.now()-talkDownAt<400){talkSticky=true;talkUi(true,"Talking — click to stop")}   // short click: keep talking
+  else talkEnd()});
+tb.addEventListener("pointercancel",()=>{if(!talkSticky)talkEnd()});
+tb.addEventListener("contextmenu",e=>e.preventDefault());
+tb.style.touchAction="none";
+addEventListener("keydown",e=>{if(e.key==="Escape")talkEnd()});
+document.addEventListener("visibilitychange",()=>{if(document.hidden)talkEnd()});
+
+
+/* ---- registered settings (/api/config) ---- */
+async function cfgGet(prefix){return getJSON("/api/config?prefix="+encodeURIComponent(prefix))}
+async function cfgSet(obj){const r=await fetch("/api/config",{method:"POST",headers:{"X-Requested-With":"lsc","Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(obj)});
+  const t=(await r.text()).trim();if(!r.ok)throw new Error(t||r.statusText);return t}
+const onoff=b=>b?"on":"off";
+
+/* ---- events: motion ---- */
+const ZC=32,ZR=18;let zone=new Array(ZC*ZR).fill(1),active=new Array(ZC*ZR).fill(0),zdrag=null;
+function hexToBits(h,n){const a=[];if(!h){return new Array(n).fill(1)}for(let i=0;i<n;i++){const v=parseInt(h[i>>2],16);a.push((v>>(3-(i&3)))&1)}return a}
+function bitsToHex(a){if(a.every(x=>x))return"";let s="";for(let i=0;i<a.length;i+=4)s+=((a[i]<<3)|(a[i+1]<<2)|(a[i+2]<<1)|a[i+3]).toString(16);return s}
+function zdraw(){const c=$("#zcv"),g=c.getContext("2d"),w=c.width/ZC,h=c.height/ZR;g.clearRect(0,0,c.width,c.height);
+  for(let i=0;i<ZC*ZR;i++){const x=(i%ZC)*w,y=Math.floor(i/ZC)*h;
+    if(!zone[i]){g.fillStyle="rgba(0,0,0,.55)";g.fillRect(x,y,w,h)}
+    if(active[i]){g.fillStyle="rgba(240,68,56,.55)";g.fillRect(x,y,w,h)}}
+  g.strokeStyle="rgba(255,255,255,.18)";g.lineWidth=1;g.beginPath();
+  for(let i=1;i<ZC;i++){g.moveTo(i*w,0);g.lineTo(i*w,c.height)}for(let j=1;j<ZR;j++){g.moveTo(0,j*h);g.lineTo(c.width,j*h)}g.stroke()}
+function zcell(e){const r=$("#zcv").getBoundingClientRect();const cx=Math.floor((e.clientX-r.left)/r.width*ZC),cy=Math.floor((e.clientY-r.top)/r.height*ZR);
+  return cx>=0&&cy>=0&&cx<ZC&&cy<ZR?cy*ZC+cx:-1}
+$("#zcv").addEventListener("pointerdown",e=>{const i=zcell(e);if(i<0)return;$("#zcv").setPointerCapture(e.pointerId);zdrag=zone[i]?0:1;zone[i]=zdrag;zdraw()});
+$("#zcv").addEventListener("pointermove",e=>{if(zdrag===null)return;const i=zcell(e);if(i>=0&&zone[i]!==zdrag){zone[i]=zdrag;zdraw()}});
+for(const ev of["pointerup","pointercancel"])$("#zcv").addEventListener(ev,()=>zdrag=null);
+$("#z_all").addEventListener("click",()=>{zone.fill(1);zdraw()});$("#z_none").addEventListener("click",()=>{zone.fill(0);zdraw()});
+$("#z_inv").addEventListener("click",()=>{zone=zone.map(x=>x?0:1);zdraw()});
+async function zsnap(){try{const r=await fetch("/snapshot.jpg");if(r.ok){const u=URL.createObjectURL(await r.blob());const old=$("#zimg").src;$("#zimg").src=u;if(old.startsWith("blob:"))URL.revokeObjectURL(old)}}catch(e){}}
+$("#z_snap").addEventListener("click",zsnap);
+$("#md_sens").addEventListener("input",()=>$("#md_sens_v").textContent=$("#md_sens").value);
+for(const b of $$("#md_src button"))b.addEventListener("click",()=>setSeg("md_src",b.dataset.v));
+$("#sd_thr").addEventListener("input",()=>{$("#sd_thr_v").textContent=$("#sd_thr").value;sdMark()});
+function sdMark(){$("#sd_mark").style.left=Math.max(0,Math.min(100,(+$("#sd_thr").value+70)/70*100))+"%"}
+async function loadEvents(){
+  try{const c=await cfgGet("md.");$("#md_en").checked=c["md.enabled"]==="on";$("#md_sens").value=c["md.sensitivity"];$("#md_sens_v").textContent=c["md.sensitivity"];
+    $("#md_hold").value=c["md.hold"];setSeg("md_src",c["md.source"]||"software");zone=hexToBits(c["md.zones"],ZC*ZR);zdraw()}catch(e){}
+  try{const c=await cfgGet("sound.");$("#sd_en").checked=c["sound.enabled"]==="on";$("#sd_thr").value=c["sound.threshold"];$("#sd_thr_v").textContent=c["sound.threshold"];$("#sd_hold").value=c["sound.hold"];sdMark()}catch(e){}
+  zsnap()}
+$("#md_save").addEventListener("click",async()=>{try{await cfgSet({"md.enabled":onoff($("#md_en").checked),"md.sensitivity":$("#md_sens").value,"md.hold":$("#md_hold").value,"md.source":segVal("md_src","software"),"md.zones":bitsToHex(zone)});toast("Motion settings saved")}catch(e){toast(e.message,true)}});
+$("#sd_save").addEventListener("click",async()=>{try{await cfgSet({"sound.enabled":onoff($("#sd_en").checked),"sound.threshold":$("#sd_thr").value,"sound.hold":$("#sd_hold").value});toast("Sound settings saved")}catch(e){toast(e.message,true)}});
+$("#tp_en").addEventListener("change",async()=>{try{await cfgSet({"tamper.enabled":onoff($("#tp_en").checked)});toast("Tamper alert "+($("#tp_en").checked?"on":"off"))}catch(e){toast(e.message,true)}});
+function evStatus(id,on,txt){const e=$("#"+id);e.textContent=txt;e.className="status"+(on?" warn":"")}
+async function pollEvents(){
+  try{const j=await getJSON("/api/events");const e=j.events;
+    evStatus("md_state",e.motion,!j.md.enabled?"Off":e.motion?"Motion now":"No motion");
+    $("#md_hwnote").textContent=j.md.hw_note?"Not working now: "+j.md.hw_note:"";
+    evStatus("sd_state",e.sound,$("#sd_en").checked?(e.sound?"Sound now":"Quiet"):"Off");
+    const tp=j.tamper||{};$("#tp_en").checked=!!tp.enabled;
+    evStatus("tp_state",tp.tamper,!tp.enabled?"Off":tp.state==="covered"?"Lens covered":tp.state==="moved"?"Camera moved":"OK");
+    $("#tp_now").textContent=tp.enabled?`match ${(+tp.corr).toFixed(2)} · texture ${(+tp.texture).toFixed(1)}`:"—";
+    $("#tp_last").textContent=e.last_tamper?"Last alert: "+e.last_tamper+".":"";
+    $("#md_last").textContent=e.last_motion?"Last motion: "+e.last_motion+".":"";$("#sd_last").textContent=e.last_sound?"Last sound: "+e.last_sound+".":"";
+    active=hexToBits(j.md.active||"0".repeat(144),ZC*ZR);if(!j.md.active)active.fill(0);zdraw();
+    const db=j.sound_db;$("#sd_now").textContent=db<=-90?"silence":db+" dB";$("#sd_fill").style.width=Math.max(0,Math.min(100,(db+70)/70*100))+"%";
+    mqState(e.mqtt);$("#wh_state").textContent=e.webhook||"";$("#wh_state").hidden=!e.webhook;$("#wh_state").className="status"+(e.webhook.startsWith("ok")?" ok":" warn");
+  }catch(e){}}
+let evTimer=null;
+function evPolling(on){clearInterval(evTimer);evTimer=on?setInterval(()=>{if(!document.hidden)pollEvents()},800):null;if(on)pollEvents()}
+
+/* ---- integrations: MQTT + webhook ---- */
+function mqState(m){const e=$("#mq_state");if(!m)return;
+  e.textContent=m.connected?"Connected":($("#mq_en").checked?(m.error||"Connecting…"):"Off");e.className="status"+(m.connected?" ok":m.error?" warn":"")}
+function mqTls(){const on=$("#mq_tls").checked,cc=segVal("mq_cc","none");$("#mq_tlsbox").hidden=!on;$("#mq_cc_camera").hidden=cc!=="camera";$("#mq_cc_custom").hidden=cc!=="custom";
+  $("#mq_cc_desc").textContent={none:"The broker doesn't ask for one",camera:"The camera creates and renews its own (signed by the camera CA)",custom:"From your own CA"}[cc]}
+$("#mq_tls").addEventListener("change",mqTls);
+for(const b of $$("#mq_cc button"))b.addEventListener("click",()=>{setSeg("mq_cc",b.dataset.v);mqTls()});
+for(const b of $$("#mq_verify button"))b.addEventListener("click",()=>setSeg("mq_verify",b.dataset.v));
+async function mqTlsInfo(){try{const t=await getJSON("/api/mqtt/tls");$("#mq_ca").textContent=t.ca||"None";$("#mq_pin").textContent=t.pin?"sha256//"+t.pin:"—";
+  $("#mq_camcert").textContent=t.camera_cert||"(created on first use)";$("#mq_cuscert").textContent=(t.custom_cert||"no certificate")+(t.custom_key?", key on the camera":", no key")}catch(e){}}
+async function loadIntegrations(){
+  try{const c=await cfgGet("mqtt.");$("#mq_en").checked=c["mqtt.enabled"]==="on";$("#mq_host").value=c["mqtt.host"];$("#mq_port").value=c["mqtt.port"];
+    $("#mq_user").value=c["mqtt.user"];$("#mq_pass").value="";$("#mq_pass").placeholder=c["mqtt.pass"]?"unchanged":"";$("#mq_topic").value=c["mqtt.topic"];
+    $("#mq_disc").checked=c["mqtt.discovery"]==="on";$("#mq_tls").checked=c["mqtt.tls"]==="on";setSeg("mq_verify",c["mqtt.tls_verify"]);setSeg("mq_cc",c["mqtt.client_cert"]);mqTls()}catch(e){}
+  try{const c=await cfgGet("events.");$("#wh_url").value=c["events.webhook"];$("#ev_snap").checked=c["events.snapshot"]==="on"}catch(e){}
+  try{const c=await cfgGet("onvif.");$("#onvif_en").checked=c["onvif.enabled"]==="on";$("#onvif_url").textContent=`http://${location.hostname}/onvif/device_service`}catch(e){}
+  try{const m=await getJSON("/api/events");$("#mq_topic").placeholder=m.events.mqtt.node?"lsc_camera/"+m.events.mqtt.node.replace(/^lsc_/,""):"lsc_camera/…";mqState(m.events.mqtt)}catch(e){}
+  mqTlsInfo()}
+$("#mq_save").addEventListener("click",async()=>{const o={"mqtt.host":$("#mq_host").value.trim(),"mqtt.port":$("#mq_port").value.trim()||"1883","mqtt.user":$("#mq_user").value,
+    "mqtt.topic":$("#mq_topic").value.trim(),"mqtt.discovery":onoff($("#mq_disc").checked),"mqtt.tls":onoff($("#mq_tls").checked),"mqtt.tls_verify":segVal("mq_verify","on"),
+    "mqtt.client_cert":segVal("mq_cc","none"),"events.snapshot":onoff($("#ev_snap").checked),"mqtt.enabled":onoff($("#mq_en").checked)};
+  if($("#mq_pass").value)o["mqtt.pass"]=$("#mq_pass").value;
+  try{await cfgSet(o);$("#mq_pass").value="";toast("MQTT settings saved");setTimeout(loadIntegrations,2500)}catch(e){toast(e.message,true)}});
+async function upload(what,input){const f=input.files[0];if(!f)return;
+  try{const r=await fetch("/api/mqtt/upload?what="+what,{method:"POST",headers:{"X-Requested-With":"lsc","Content-Type":"application/x-pem-file"},body:await f.text()});
+    if(!r.ok)throw new Error((await r.text()).trim());toast("Uploaded");mqTlsInfo()}catch(e){toast(e.message,true)}input.value=""}
+$("#mq_ca_file").addEventListener("change",e=>upload("ca",e.target));$("#mq_cert_file").addEventListener("change",e=>upload("cert",e.target));$("#mq_key_file").addEventListener("change",e=>upload("key",e.target));
+$("#mq_fetch").addEventListener("click",async()=>{const b=$("#mq_fetch");b.disabled=true;
+  try{const r=await fetch("/api/mqtt/fetch",{method:"POST",headers:{"X-Requested-With":"lsc","Content-Type":"application/x-www-form-urlencoded"},
+      body:new URLSearchParams({host:$("#mq_host").value.trim(),port:$("#mq_port").value.trim()})});
+    if(!r.ok)throw new Error((await r.text()).trim());const chain=await r.json();
+    const hex=h=>h.toUpperCase().match(/.{2}/g).join(":");
+    $("#mq_chain").innerHTML=chain.map((c,i)=>`<div class="cert" style="padding:10px 0;border-top:${i?"1px solid var(--line)":"0"}"><div class="rt">${i===0?"Broker":"CA"}: ${esc(c.subject)}</div>
+      <div class="rd">Issued by ${esc(c.issuer)}${c.self_signed?" (self-signed)":""}${c.ca?" · CA":""} · until ${esc(c.until)}</div>
+      <dl><dt>SHA-256</dt><dd><code>${hex(c.sha256)}</code></dd><dt>Key pin</dt><dd><code>sha256//${esc(c.pin)}</code></dd></dl></div>`).join("");
+    const top=chain[chain.length-1];mqShown={ca:top.sha256,pin:chain[0].pin};$("#mq_trust_ca").hidden=!(top.ca||top.self_signed);$("#mq_fetched").hidden=false}catch(e){toast(e.message,true)}b.disabled=false});
+let mqShown={};
+async function trust(what){try{await post("/api/mqtt/trust",{what,expect:mqShown[what]||""});$("#mq_fetched").hidden=true;setSeg("mq_verify",what==="ca"?"on":"pin");
+  await cfgSet({"mqtt.tls_verify":what==="ca"?"on":"pin"});toast(what==="ca"?"Broker CA saved":"Broker key pinned");mqTlsInfo()}catch(e){toast(e.message,true)}}
+$("#mq_trust_ca").addEventListener("click",()=>trust("ca"));$("#mq_trust_pin").addEventListener("click",()=>trust("pin"));
+$("#mq_ca_clear").addEventListener("click",async()=>{try{await post("/api/mqtt/clear",{what:"ca"});mqTlsInfo()}catch(e){toast(e.message,true)}});
+$("#mq_csr").addEventListener("click",async()=>{if(!confirm("Create a new client key on the camera? The current own certificate is removed; sign the downloaded request (CSR) with your CA and upload the certificate."))return;
+  try{const r=await fetch("/api/mqtt/csr",{method:"POST",headers:{"X-Requested-With":"lsc"}});if(!r.ok)throw new Error((await r.text()).trim());
+    const a=document.createElement("a");a.href=URL.createObjectURL(await r.blob());a.download="camera-mqtt.csr";document.body.appendChild(a);a.click();a.remove();mqTlsInfo();toast("Key created — sign the CSR")}catch(e){toast(e.message,true)}});
+$("#onvif_en").addEventListener("change",async e=>{try{await cfgSet({"onvif.enabled":onoff(e.target.checked)});toast("ONVIF "+(e.target.checked?"on":"off"))}catch(err){toast(err.message,true)}});
+$("#wh_save").addEventListener("click",async()=>{try{await cfgSet({"events.webhook":$("#wh_url").value.trim()});toast("Webhook saved")}catch(e){toast(e.message,true)}});
+
+/* ---- audio codec, device name ---- */
+async function loadMisc(){try{const c=await cfgGet("audio.");setSeg("acodec",c["audio.codec"])}catch(e){}
+  try{const c=await cfgGet("device.");$("#devname").value=c["device.name"]}catch(e){}}
+for(const b of $$("#acodec button"))b.addEventListener("click",async()=>{try{await cfgSet({"audio.codec":b.dataset.v});setSeg("acodec",b.dataset.v);toast("RTSP audio: "+b.textContent+" (new connections)")}catch(e){toast(e.message,true)}});
+$("#devname_save").addEventListener("click",async()=>{try{await cfgSet({"device.name":$("#devname").value.trim()});toast("Name saved");refresh()}catch(e){toast(e.message,true)}});
+
+
+/* ---- recordings ---- */
+const fmtSize=b=>b>1048576?(b/1048576).toFixed(1)+" MB":Math.max(1,Math.round(b/1024))+" KB";
+let recDay="";
+$("#rec_pre").addEventListener("input",()=>$("#rec_pre_v").textContent=$("#rec_pre").value);
+for(const b of $$("#rec_mode button"))b.addEventListener("click",()=>setSeg("rec_mode",b.dataset.v));
+async function recStatus(){try{const s=await getJSON("/api/rec");
+  $("#rec_sd").textContent=s.sd?`SD card: ${(s.free_mb/1024).toFixed(1)} GB free of ${(s.total_mb/1024).toFixed(1)} GB`:"No SD card in the camera.";
+  const st=$("#rec_state");st.textContent=s.error?s.error:s.recording?"Recording":s.mode==="off"?"Off":s.mode==="continuous"?"Starting":{motion:"Waiting for motion",sound:"Waiting for sound",events:"Waiting for motion or sound"}[s.mode]||"Waiting";
+  st.className="status"+(s.error?" warn":s.recording?" ok":"");
+  if(s.schedule){const sc=s.schedule,ss=$("#sc_state");ss.textContent=sc.privacy?"Privacy now":!sc.record?"Not recording now":!sc.events?"Alerts paused now":"";ss.hidden=!ss.textContent;ss.className="status"+(sc.privacy?" warn":"");
+    if(sc.privacy)st.textContent="Privacy mode"}
+  if(s.timelapse)st.textContent+=" · timelapse"}catch(e){}}
+async function loadRecordings(){
+  try{const c=await cfgGet("record.");setSeg("rec_mode",c["record.mode"]);$("#rec_pre").value=c["record.pre"];$("#rec_pre_v").textContent=c["record.pre"];
+    $("#rec_post").value=c["record.post"];$("#rec_seg").value=c["record.segment"];$("#rec_audio").checked=c["record.audio"]==="on";
+    $("#rec_snaps").checked=c["record.snapshots"]==="on";$("#rec_keep").value=c["record.keep_free"];$("#rec_keepdays").value=c["record.keep_days"]||0}catch(e){}
+  loadSched();recStatus();recDays()}
+async function recDays(){try{const j=await getJSON("/api/rec/list");
+  $("#rec_days").innerHTML=j.days.length?j.days.map(d=>`<button class="sm${d.day===recDay?" on":""}" data-day="${esc(d.day)}">${esc(d.day)} <span class="muted">${d.files} · ${fmtSize(d.bytes)}</span></button>`).join(""):'<span class="muted">No recordings yet.</span>';
+  for(const b of $$("#rec_days button"))b.addEventListener("click",()=>recFiles(b.dataset.day));
+  if(recDay&&j.days.some(d=>d.day===recDay))recFiles(recDay,true);else if(j.days.length&&!recDay)recFiles(j.days[0].day,true)}catch(e){}}
+async function recFiles(day,keepView){recDay=day;for(const b of $$("#rec_days button"))b.classList.toggle("on",b.dataset.day===day);
+  if(!keepView){$("#rec_view").hidden=true;$("#rec_view").innerHTML=""}
+  try{const j=await getJSON("/api/rec/list?day="+encodeURIComponent(day));
+    const kind=n=>n.endsWith(".jpg")?n.replace(/^[\d-]+_/,"").replace(".jpg","")+" picture":n.includes("_motion")?"motion video":n.includes("_sound")?"sound video":n.includes("_event")?"motion + sound video":n.includes("_timelapse")?"timelapse":"video";
+    $("#rec_files").innerHTML=j.files.map(f=>`<div class="file" data-n="${esc(f.name)}"><span class="t">${esc(f.name.slice(0,8).replace(/-/g,":"))}</span>
+      <span class="k">${esc(kind(f.name))}${f.recording?" · recording…":""} · ${fmtSize(f.size)}</span>
+      <button class="sm icon" data-a="view" title="View"><i data-i="${f.name.endsWith(".jpg")?"image":"play"}"></i></button>
+      <a class="btn sm icon" style="width:28px;height:28px;padding:0" href="/rec/${encodeURIComponent(day)}/${encodeURIComponent(f.name)}?dl=1" title="Download"><i data-i="download"></i></a>
+      ${f.recording?"":'<button class="sm icon danger" data-a="del" title="Delete">✕</button>'}</div>`).join("")||'<div class="file muted">Empty</div>';
+    for(const el of $$("#rec_files i[data-i]"))icon(el,el.dataset.i);
+    $("#rec_files").hidden=false;$("#rec_dayact").hidden=false;
+    for(const row of $$("#rec_files .file[data-n]")){const n=row.dataset.n;
+      row.querySelector('[data-a="view"]').addEventListener("click",()=>{for(const r of $$("#rec_files .file"))r.classList.toggle("sel",r===row);
+        const u=`/rec/${encodeURIComponent(day)}/${encodeURIComponent(n)}`;$("#rec_view").innerHTML=n.endsWith(".jpg")?`<img src="${u}" alt="">`:`<video src="${u}" controls autoplay playsinline></video>`;$("#rec_view").hidden=false});
+      const d=row.querySelector('[data-a="del"]');if(d)d.addEventListener("click",async()=>{if(!confirm("Delete "+n+"?"))return;
+        try{await post("/api/rec/delete",{day,name:n});recDays()}catch(e){toast(e.message,true)}})}
+  }catch(e){toast("Cannot list recordings",true)}}
+$("#rec_reload").addEventListener("click",()=>{recStatus();recDays()});
+$("#rec_delday").addEventListener("click",async()=>{if(!recDay||!confirm("Delete every recording of "+recDay+"?"))return;
+  try{await post("/api/rec/delete",{day:recDay});recDay="";$("#rec_files").hidden=true;$("#rec_dayact").hidden=true;$("#rec_view").hidden=true;recDays()}catch(e){toast(e.message,true)}});
+$("#rec_save").addEventListener("click",async()=>{try{await cfgSet({"record.mode":segVal("rec_mode","off"),"record.pre":$("#rec_pre").value,"record.post":$("#rec_post").value,
+  "record.segment":$("#rec_seg").value,"record.audio":onoff($("#rec_audio").checked),"record.snapshots":onoff($("#rec_snaps").checked),"record.keep_free":$("#rec_keep").value,"record.keep_days":$("#rec_keepdays").value,"timelapse.interval":segVal("tl_int","0"),"timelapse.fps":segVal("tl_fps","15")});
+  toast("Recording settings saved");setTimeout(recStatus,1500)}catch(e){toast(e.message,true)}});
+
+
+/* ---- WDR, anti-flicker, privacy masks ---- */
+$("#wdr").addEventListener("input",()=>$("#wdr_v").textContent=$("#wdr").value);
+$("#wdr").addEventListener("change",async()=>{try{await cfgSet({"image.wdr":$("#wdr").value});toast("Backlight: "+$("#wdr").value)}catch(e){toast(e.message,true)}});
+$("#nr").addEventListener("input",()=>$("#nr_v").textContent=$("#nr").value);
+$("#nr").addEventListener("change",async()=>{try{await cfgSet({"image.nr":$("#nr").value});toast("Noise reduction: "+$("#nr").value)}catch(e){toast(e.message,true)}});
+for(const b of $$("#ledfb button"))b.addEventListener("click",async()=>{try{await cfgSet({"led.feedback":b.dataset.v});setSeg("ledfb",b.dataset.v);toast("LED activity: "+b.textContent)}catch(e){toast(e.message,true)}});
+$("#micgain").addEventListener("change",async e=>{try{await cfgSet({"audio.mic_gain":e.target.value});toast("Microphone gain: "+e.target.selectedOptions[0].textContent)}catch(err){toast(err.message,true)}});
+for(const [id,name,label] of [["micmute","audio.mute","Microphone off"],["micagc","audio.agc","Automatic gain"],["micaec","audio.aec","Echo cancellation"]])
+  $("#"+id).addEventListener("change",async e=>{try{await cfgSet({[name]:e.target.checked?"on":"off"});toast(label+": "+(e.target.checked?"on":"off"))}catch(err){e.target.checked=!e.target.checked;toast(err.message,true)}});
+for(const b of $$("#micmop button"))b.addEventListener("click",async()=>{try{await cfgSet({"audio.mute_on_play":b.dataset.v});setSeg("micmop",b.dataset.v);toast("Mute while playing: "+b.textContent)}catch(e){toast(e.message,true)}});
+$("#micgate").addEventListener("input",()=>$("#micgate_v").textContent=$("#micgate").value==="-90"?"off":$("#micgate").value+" dB");
+$("#micgate").addEventListener("change",async()=>{try{await cfgSet({"audio.gate_db":$("#micgate").value});toast("Noise gate: "+($("#micgate").value==="-90"?"off":$("#micgate").value+" dB"))}catch(e){toast(e.message,true)}});
+for(const b of $$("#flicker button"))b.addEventListener("click",async()=>{try{await cfgSet({"image.flicker":b.dataset.v});setSeg("flicker",b.dataset.v);toast("Anti-flicker: "+b.textContent)}catch(e){toast(e.message,true)}});
+for(const b of $$("#vprofile button"))b.addEventListener("click",async()=>{try{await cfgSet({"video.profile":b.dataset.v});setSeg("vprofile",b.dataset.v);toast("H.264 profile: "+b.textContent+" (restart to apply)")}catch(e){toast(e.message,true)}});
+for(const [id,name,label,note] of [["idlefps","video.idle_fps","Frame rate when idle",""],["idlewake","video.idle_wake","Full rate on motion in",""],["vsmart","video.smart","Smart encoding"," (restart to apply)"]])
+  for(const b of $$("#"+id+" button"))b.addEventListener("click",async()=>{try{await cfgSet({[name]:b.dataset.v});setSeg(id,b.dataset.v);toast(label+": "+b.textContent+note)}catch(e){toast(e.message,true)}});
+let masks=[],mdrag=null;
+function mdraw(){const c=$("#mcv"),g=c.getContext("2d");g.clearRect(0,0,c.width,c.height);
+  const mos=segVal("mstyle","color")==="mosaic";
+  for(const r of masks.concat(mdrag?[mdrag]:[])){const x=r[0]/3,y=r[1]/3,w=(r[2]-r[0])/3,h=(r[3]-r[1])/3;
+    g.fillStyle=mos?"rgba(128,128,128,.6)":$("#mcolor").value+"cc";g.fillRect(x,y,w,h);g.strokeStyle="#fff";g.setLineDash([4,3]);g.strokeRect(x+.5,y+.5,w-1,h-1)}}
+function mpt(e){const r=$("#mcv").getBoundingClientRect();return[Math.max(0,Math.min(1919,Math.round((e.clientX-r.left)/r.width*1920))),Math.max(0,Math.min(1079,Math.round((e.clientY-r.top)/r.height*1080)))]}
+$("#mcv").addEventListener("pointerdown",e=>{const [x,y]=mpt(e);const hit=masks.findIndex(r=>x>=r[0]&&x<=r[2]&&y>=r[1]&&y<=r[3]);
+  if(hit>=0){masks.splice(hit,1);mdraw();return}
+  if(masks.length>=4){toast("Up to 4 areas",true);return}
+  $("#mcv").setPointerCapture(e.pointerId);mdrag=[x,y,x,y,x,y]});
+$("#mcv").addEventListener("pointermove",e=>{if(!mdrag)return;const [x,y]=mpt(e);mdrag=[Math.min(mdrag[4],x),Math.min(mdrag[5],y),Math.max(mdrag[4],x),Math.max(mdrag[5],y),mdrag[4],mdrag[5]];mdraw()});
+$("#mcv").addEventListener("pointerup",()=>{if(mdrag&&mdrag[2]-mdrag[0]>8&&mdrag[3]-mdrag[1]>8)masks.push(mdrag.slice(0,4));mdrag=null;mdraw()});
+for(const b of $$("#mstyle button"))b.addEventListener("click",()=>{setSeg("mstyle",b.dataset.v);$("#mcolor").hidden=b.dataset.v==="mosaic";mdraw()});
+$("#mcolor").addEventListener("input",mdraw);
+$("#mclear").addEventListener("click",()=>{masks=[];mdraw()});
+async function msnap(){try{const r=await fetch("/snapshot.jpg");if(r.ok){const u=URL.createObjectURL(await r.blob());const old=$("#mimg").src;$("#mimg").src=u;if(old.startsWith("blob:"))URL.revokeObjectURL(old)}}catch(e){}}
+$("#msnap").addEventListener("click",msnap);
+$("#msave").addEventListener("click",async()=>{const mos=segVal("mstyle","color")==="mosaic";
+  try{await cfgSet({"mask.color":mos?"mosaic":$("#mcolor").value,"mask.areas":masks.map(r=>r.join(",")).join(";")});toast(masks.length?"Masks saved":"Masks removed");setTimeout(msnap,800)}catch(e){toast(e.message,true)}});
+async function loadImageExtra(){
+  try{const c=await cfgGet("image.");$("#wdr").value=c["image.wdr"];$("#wdr_v").textContent=c["image.wdr"];$("#nr").value=c["image.nr"];$("#nr_v").textContent=c["image.nr"];setSeg("flicker",c["image.flicker"])}catch(e){}
+  try{const c=await cfgGet("led.feedback");setSeg("ledfb",c["led.feedback"])}catch(e){}
+  try{const c=await cfgGet("audio.mic_gain");$("#micgain").value=c["audio.mic_gain"]}catch(e){}
+  try{const c=await cfgGet("audio.");$("#micmute").checked=c["audio.mute"]==="on";setSeg("micmop",c["audio.mute_on_play"]);$("#micagc").checked=c["audio.agc"]==="on";$("#micaec").checked=c["audio.aec"]==="on";$("#micaec_st").textContent=c["audio.aec"]==="on"?"State: "+c["audio.aec_state"]:"";
+    $("#micgate").value=c["audio.gate_db"];$("#micgate_v").textContent=c["audio.gate_db"]==="-90"?"off":c["audio.gate_db"]+" dB"}catch(e){}
+  try{const c=await cfgGet("video.");setSeg("vprofile",c["video.profile"]);setSeg("idlefps",c["video.idle_fps"]);setSeg("idlewake",c["video.idle_wake"]);setSeg("vsmart",c["video.smart"])}catch(e){}
+  try{const c=await cfgGet("mask.");masks=(c["mask.areas"]||"").split(";").filter(x=>x).map(x=>x.split(",").map(Number));
+    const mos=c["mask.color"]==="mosaic";setSeg("mstyle",mos?"mosaic":"color");$("#mcolor").hidden=mos;if(!mos)$("#mcolor").value=c["mask.color"];mdraw()}catch(e){}
+  msnap()}
+
+
+/* ---- video quality ---- */
+let vqSet={kbps:1536,gop:30};
+function vqEst(){const k=+$("#vq_kbps").value||1536;const gbDay=k*1000/8*86400/1e9;
+  $("#vq_est").textContent=`About ${gbDay.toFixed(1)} GB per day of continuous recording at most (night and still scenes use less)`;
+  setSeg("vq_preset",String(k))}
+$("#vq_kbps").addEventListener("input",vqEst);
+for(const b of $$("#vq_preset button"))b.addEventListener("click",()=>{$("#vq_kbps").value=b.dataset.v;vqEst()});
+for(const b of $$("#vq_gop button"))b.addEventListener("click",()=>setSeg("vq_gop",b.dataset.v));
+$("#sub_en").addEventListener("change",async()=>{const on=$("#sub_en").checked;
+  try{await cfgSet({"video.sub":onoff(on)});
+    if(confirm(`Restart now to ${on?"start":"stop"} the second stream? Video stops for about a minute.`)){await post("/api/reboot");toast("Restarting…")}
+    else toast("Second stream "+(on?"on":"off")+" after the next restart")}catch(e){toast(e.message,true)}});
+$("#vq_jpeg").addEventListener("input",()=>$("#vq_jpeg_v").textContent=$("#vq_jpeg").value);
+$("#vq_jpeg").addEventListener("change",async()=>{try{await cfgSet({"image.jpeg_quality":$("#vq_jpeg").value});toast("Picture quality: "+$("#vq_jpeg").value)}catch(e){toast(e.message,true)}});
+async function loadQuality(){
+  try{const c=await cfgGet("venc.");$("#vq_kbps").value=c["venc.kbps"];setSeg("vq_gop",c["venc.gop"]);vqEst()}catch(e){}
+  $("#sub_url").textContent=`rtsp://${location.hostname}:554/sub`;
+  try{const st=await getJSON("/api/sub");$("#sub_en").checked=st.enabled;
+    $("#sub_note").textContent=st.note?"Note: "+st.note+".":st.enabled&&!st.running?"Not running yet (restart needed).":st.running?"Running.":""}catch(e){}
+  try{const c=await cfgGet("image.jpeg");$("#vq_jpeg").value=c["image.jpeg_quality"];$("#vq_jpeg_v").textContent=c["image.jpeg_quality"]}catch(e){}
+  try{const s=await getJSON("/api/status");vqSet={kbps:s.kbps_set,gop:s.gop_set};
+    $("#vq_now").textContent=s.kbps_now?`Now ${s.kbps_now} kbps`:"";$("#vq_now").hidden=!s.kbps_now;
+    $("#vq_note").textContent=s.venc_note?"Note: "+s.venc_note+".":""}catch(e){}}
+$("#vq_save").addEventListener("click",async()=>{const k=+$("#vq_kbps").value,g=segVal("vq_gop","30");
+  if(!(k>=256&&k<=4096)){toast("Bitrate must be 256 to 4096 kbps",true);return}
+  if(k===vqSet.kbps&&+g===vqSet.gop){toast("Already in use");return}
+  if(!confirm(`Restart the camera with ${k} kbps and a keyframe every ${g/15} s? Video stops for about a minute.`))return;
+  try{await cfgSet({"venc.kbps":String(k),"venc.gop":g});await post("/api/reboot");toast("Restarting with the new video settings…")}catch(e){toast(e.message,true)}});
+
+
+/* ---- schedules + timelapse ---- */
+const SC_DESC={record:"Hours when the SD card may record (recording mode and timelapse). Every hour = no restriction.",
+  events:"Hours when motion, sound and tamper alerts are sent (Home Assistant, webhook, ONVIF, event clips). Every hour = always.",
+  privacy:"Privacy hours: the picture is blacked out on every stream, the microphone is muted, and nothing is recorded or reported."};
+const SC_DAYS=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+let scBits={record:[],events:[],privacy:[]},scWhich="record",scPaint=null;
+function hexToSc(h,empty){const b=new Array(168).fill(empty);if(!h)return b;for(let i=0;i<168;i++)b[i]=(parseInt(h[i>>2],16)>>(3-(i&3)))&1;return b}
+function scToHex(b,emptyIf){if(b.every(x=>x===emptyIf))return"";let h="";for(let i=0;i<168;i+=4)h+=((b[i]<<3)|(b[i+1]<<2)|(b[i+2]<<1)|b[i+3]).toString(16);return h}
+function scDraw(){const g=$("#sc_grid"),b=scBits[scWhich];g.classList.toggle("priv",scWhich==="privacy");
+  if(!g.children.length){let h='<span></span>';for(let x=0;x<24;x++)h+=`<span class="h">${x}</span>`;
+    for(let d=0;d<7;d++){h+=`<span class="d">${SC_DAYS[d]}</span>`;for(let x=0;x<24;x++)h+=`<span class="c" data-i="${d*24+x}" title="${SC_DAYS[d]} ${x}:00-${x+1}:00"></span>`}
+    g.innerHTML=h;
+    g.addEventListener("pointerdown",e=>{const c=e.target.closest(".c");if(!c)return;e.preventDefault();const i=+c.dataset.i;scPaint=scBits[scWhich][i]?0:1;scBits[scWhich][i]=scPaint;scDraw()});
+    g.addEventListener("pointerover",e=>{if(scPaint===null)return;const c=e.target.closest(".c");if(!c)return;scBits[scWhich][+c.dataset.i]=scPaint;scDraw()});
+    g.addEventListener("pointermove",e=>{if(scPaint===null||e.pointerType==="mouse")return;const el=document.elementFromPoint(e.clientX,e.clientY);const c=el&&el.closest&&el.closest("#sc_grid .c");if(c){scBits[scWhich][+c.dataset.i]=scPaint;scDraw()}});
+    window.addEventListener("pointerup",()=>scPaint=null)}
+  for(const c of $$("#sc_grid .c"))c.classList.toggle("on",!!b[+c.dataset.i]);
+  $("#sc_desc").textContent=SC_DESC[scWhich]}
+for(const b of $$("#sc_which button"))b.addEventListener("click",()=>{scWhich=b.dataset.v;setSeg("sc_which",scWhich);scDraw()});
+$("#sc_all").addEventListener("click",()=>{scBits[scWhich].fill(1);scDraw()});
+$("#sc_none").addEventListener("click",()=>{scBits[scWhich].fill(0);scDraw()});
+$("#sc_work").addEventListener("click",()=>{scBits[scWhich]=scBits[scWhich].map((_,i)=>(i/24|0)<5&&i%24>=8&&i%24<18?1:0);scDraw()});
+$("#sc_nights").addEventListener("click",()=>{scBits[scWhich]=scBits[scWhich].map((_,i)=>i%24>=22||i%24<7?1:0);scDraw()});
+$("#sc_save").addEventListener("click",async()=>{
+  if(scBits.record.every(x=>!x)&&!confirm("No recording hour is selected: nothing will be recorded. Save anyway?"))return;
+  try{await cfgSet({"sched.record":scToHex(scBits.record,1),"sched.events":scToHex(scBits.events,1),"sched.privacy":scToHex(scBits.privacy,0)});toast("Schedule saved");recStatus()}catch(e){toast(e.message,true)}});
+async function loadSched(){try{const c=await cfgGet("sched.");scBits={record:hexToSc(c["sched.record"],1),events:hexToSc(c["sched.events"],1),privacy:hexToSc(c["sched.privacy"],0)};scDraw()}catch(e){}
+  try{const c=await cfgGet("timelapse.");setSeg("tl_int",c["timelapse.interval"]);setSeg("tl_fps",c["timelapse.fps"])}catch(e){}}
+for(const id of ["tl_int","tl_fps"])for(const b of $$("#"+id+" button"))b.addEventListener("click",()=>setSeg(id,b.dataset.v));
+
+/* ---- start ---- */
+showTab(location.hash.slice(1));
+setTimeout(goLive,150);   // live by default; falls back to snapshots
+loadParams().catch(()=>{});osdLoad();refresh();loadTls();
+setInterval(refresh,15000);setInterval(osdTick,1000);
+</script>
+</body>
+</html>

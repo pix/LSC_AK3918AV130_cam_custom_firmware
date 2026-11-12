@@ -38,6 +38,9 @@ int audio_start(void);
 
 void audio_stop(void);
 
+/* Registers audio.mic_gain (analog mic gain 0..7, -1 = driver default). */
+void audio_register_params(void);
+
 /* Non-blocking. Copies the oldest not-yet-consumed period into buf (up to
  * max_samples samples) and writes the sample count to *out_samples.
  * Returns 1 if a frame was copied, 0 if none is available yet, -1 if audio

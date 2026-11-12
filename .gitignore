@@ -63,3 +63,20 @@ obj/
 # OS Specific
 .DS_Store
 Thumbs.db
+
+# ak_rtsp-auth additions
+/src/ak_rtsp/isp_hook.so
+/src/ak_rtsp/ak_rtsp.debug
+/src/ak_rtsp/ak_rtsp.stripped
+/src/ak_rtsp/ak_rtsp_stripped
+# custom sound clip: your own WAV, never committed (sounds_custom.c is generated from it)
+/src/ak_rtsp/sounds/
+/src/ak_rtsp/sounds_custom.c
+# mbedTLS is fetched and checksum-verified by third_party/fetch_mbedtls.sh
+/src/ak_rtsp/third_party/mbedtls/
+/src/ak_rtsp/third_party/mbedtls-*.tar.bz2
+/src/ak_rtsp/third_party/mbedtls_obj/
+/src/ak_rtsp/third_party/libmbedtls_ak.a
+*.a
+# flash images and dumps
+/out/

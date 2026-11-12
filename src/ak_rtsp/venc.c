@@ -8,8 +8,13 @@
 #include <stddef.h>
 
 #include "ak_rtsp.h"
+#include "ctrl_params.h"
+#include <unistd.h>
 #include "ak_ioctls.h"
 #include "venc.h"
+#include "monotime.h"
+#include "night.h"
+#include <stdlib.h>
 
 /* DEBUG_IOCTL_DUMP (opt-in, off by default — see Makefile `debug-dump`
  * target): dumps our own VENC_IOCTL_CREATE_ENC payload to
@@ -90,17 +95,37 @@ void venc_reset_stale_channel(void)
  * Ring pool size = Σ ((block_size + 31) & ~31) over all N blocks.
  * For H264 Main 1920×1080 with MMA: 8 blocks, total = 4120384 (ENC_RING_SIZE).
  * ------------------------------------------------------------------------- */
+/* video.profile: H.264 Main (77, stock) or High (100, CABAC + 8x8, a bit
+ * better at the same bitrate). Read straight from the saved settings because
+ * the encoder is created before control_load_settings(). Needs a restart. */
+static int s_vprofile;                    /* 0 = main, 1 = high */
+static int vp_get(char *o, size_t c) { snprintf(o, c, "%s", s_vprofile ? "high" : "main"); return 0; }
+static int vp_set(const char *v, const char **e)
+{
+    if (!strcmp(v, "main")) s_vprofile = 0;
+    else if (!strcmp(v, "high")) s_vprofile = 1;
+    else { *e = "must be main or high (takes effect after a restart)"; return -1; }
+    return 0;
+}
+static uint32_t venc_profile(void) { return s_vprofile ? H264_PROFILE_IDC_HIGH : H264_PROFILE_IDC_MAIN; }
+
+static int g_smart_used;                  /* smart mode the encoder runs (stream settings below) */
+static void venc_guard_decide(void);
+
 static uint32_t venc_query_ring_pool_size(void)
 {
     uint32_t buf[21];
     memset(buf, 0, sizeof(buf));
 
-    buf[0] = H264_PROFILE_IDC_MAIN;          /* profile_idc = Main */
+    buf[0] = venc_profile();                 /* profile_idc */
     buf[1] = 1;                               /* chroma_mode = YUV420 */
     ((uint16_t *)buf)[4] = ENC_WIDTH;         /* width  */
     ((uint16_t *)buf)[5] = ENC_HEIGHT;        /* height */
     ((uint16_t *)buf)[6] = 60;                /* max_fps = 60 */
-    ((uint16_t *)buf)[7] = 0;                 /* smart_mode = 0 */
+    /* smart_mode: must match CREATE_ENC. LTR (1) and skip-frame (3) need two
+     * more reference buffers (AKV_Encoder_Get_Dma_Memory_Info: (mode & ~2)
+     * == 1); a pool sized without them is the dma_pool_alloc_obj crash. */
+    ((uint16_t *)buf)[7] = (uint16_t)g_smart_used;
     ((uint8_t  *)buf)[28] = 1;               /* hardcoded 1 */
     ((uint8_t  *)buf)[29] = 1;               /* bEnableMMA = 1 */
     ((uint8_t  *)buf)[32] = 40;              /* MVVRange_factor = 40 */
@@ -141,6 +166,11 @@ static uint32_t venc_query_ring_pool_size(void)
 int venc_create_pool(void)
 {
     printf("[ak_rtsp] sizeof(venc_dma_pool_desc)=%d\n", (int)sizeof(struct venc_dma_pool_desc));
+
+    char vp[8] = "";                          /* saved before settings are replayed */
+    if (control_saved_get("video.profile", vp, sizeof vp) == 0) s_vprofile = !strcmp(vp, "high");
+    if (s_vprofile) printf("[venc] H.264 High profile\n");
+    venc_guard_decide();                      /* before QUERY_DMA: it sizes the pool for the smart mode */
 
     uint32_t ring_size = venc_query_ring_pool_size();
 
@@ -199,13 +229,131 @@ int venc_create_pool(void)
  * The encoder takes profile/width/height from the kernel channel state cached
  * by VENC_IOCTL_QUERY_DMA, not from this struct.
  * ------------------------------------------------------------------------- */
+/* ---- stream settings (applied when the encoder is created, i.e. at boot) ----
+ * Crash guard: the encoder has crashed the kernel before on bad rate-control
+ * values, so non-default values are bracketed by a marker on CONFIG; if the
+ * camera did not get 150 frames out after the last start, the next start
+ * ignores them and uses the defaults (venc_startup_ok clears the marker). */
+#define VENC_GUARD "/etc/config/ak_rtsp_venc_guard"
+static int s_kbps = 1536, s_gop = ENC_GOP, g_guarded;
+CTRL_INT(p_kbps, s_kbps, 256, 4096)
+CTRL_INT(p_gop, s_gop, 10, 150)
+static char g_venc_note[96];
+
+/* video.smart: Anyka "smart encoding" (SDK smart_mode). gop = variable GOP:
+ * while the scene is static the keyframe interval stretches to
+ * SMART_GOPLEN frames (fewer I-frames, the bulk of a static scene's
+ * bitrate); ltr = long-term reference (P-frames can reference an old good
+ * frame instead of a new I-frame). The static/moving decision is the
+ * driver's own (akv_stream_parse_mdinfo -> Stream_state, threshold
+ * SMART_STATIC). Values: Anyka's akipc app and the LSC factory config.
+ * Experimental, off by default; covered by the crash guard. Restart. */
+#define SMART_GOPLEN  300                 /* frames (20 s at 15 fps) */
+#define SMART_QUALITY 100
+#define SMART_STATIC  550
+static int s_smart;                       /* setting: 0 off, 1 ltr, 2 gop (driver values) */
+static int sm_get(char *o, size_t c) { snprintf(o, c, "%s", s_smart == 1 ? "ltr" : s_smart == 2 ? "gop" : "off"); return 0; }
+static int sm_set(const char *v, const char **e)
+{
+    if (!strcmp(v, "off")) s_smart = 0;
+    else if (!strcmp(v, "ltr")) s_smart = 1;
+    else if (!strcmp(v, "gop")) s_smart = 2;
+    else { *e = "must be off, gop or ltr (takes effect after a restart)"; return -1; }
+    return 0;
+}
+int venc_smart_now(void) { return g_smart_used; }
+
+/* video.idle_fps: adaptive frame rate (night.c), off | 10 | 5 | 3. Applies
+ * immediately (no restart). */
+static int s_idle_fps;
+static int if_get(char *o, size_t c)
+{
+    if (s_idle_fps) snprintf(o, c, "%d", s_idle_fps); else snprintf(o, c, "off");
+    return 0;
+}
+static int if_set(const char *v, const char **e)
+{
+    int f = !strcmp(v, "off") ? 0 : atoi(v);
+    if (f != 0 && f != 10 && f != 5 && f != 3) { *e = "must be off, 10, 5 or 3"; return -1; }
+    s_idle_fps = f;
+    night_set_idle_fps(f);
+    return 0;
+}
+
+/* video.idle_wake: what brings the full frame rate back: motion in the
+ * motion zones (same as recordings/events) or anywhere in the picture. */
+static int s_wake_all;
+static int iw_get(char *o, size_t c) { snprintf(o, c, "%s", s_wake_all ? "all" : "zones"); return 0; }
+static int iw_set(const char *v, const char **e)
+{
+    if (!strcmp(v, "zones")) s_wake_all = 0;
+    else if (!strcmp(v, "all")) s_wake_all = 1;
+    else { *e = "must be zones or all"; return -1; }
+    night_set_idle_wake_all(s_wake_all);
+    return 0;
+}
+
+void venc_register_params(void)
+{
+    CTRL_REG("venc.kbps", p_kbps, CTRL_PERSIST);
+    CTRL_REG("venc.gop", p_gop, CTRL_PERSIST);
+    CTRL_REG("video.profile", vp, CTRL_PERSIST);
+    CTRL_REG("video.smart", sm, CTRL_PERSIST);
+    CTRL_REG("video.idle_fps", if, CTRL_PERSIST);
+    CTRL_REG("video.idle_wake", iw, CTRL_PERSIST);
+}
+const char *venc_note(void) { return g_venc_note; }
+static int g_kbps_used = 1536, g_gop_used = ENC_GOP;
+int venc_kbps_now(void) { return g_kbps_used; }
+int venc_gop_now(void) { return g_gop_used; }
+void venc_startup_ok(void)
+{
+    if (g_guarded) { unlink(VENC_GUARD); sync(); g_guarded = 0; }
+}
+
+/* Decide once, before QUERY_DMA, which stream settings this start uses
+ * (module settings are replayed before the encoder is created). */
+static void venc_guard_decide(void)
+{
+    g_kbps_used = s_kbps; g_gop_used = s_gop; g_smart_used = s_smart;
+    if (s_kbps != 1536 || s_gop != ENC_GOP || s_smart) {
+        if (access(VENC_GUARD, F_OK) == 0) {
+            snprintf(g_venc_note, sizeof g_venc_note, "custom stream settings skipped after an incomplete start; using defaults");
+            fprintf(stderr, "[venc] %s\n", g_venc_note);
+            g_kbps_used = 1536; g_gop_used = ENC_GOP; g_smart_used = 0;
+            unlink(VENC_GUARD);        /* defaults are known-good; retry custom values next boot */
+        } else {
+            int gfd = open(VENC_GUARD, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (gfd >= 0) { fsync(gfd); close(gfd); sync(); }
+            g_guarded = 1;
+        }
+    }
+    if (g_smart_used) printf("[venc] smart encoding: %s (GOP up to %d, static threshold %d)\n",
+                             g_smart_used == 1 ? "ltr" : "gop", SMART_GOPLEN, SMART_STATIC);
+}
+
+/* Ask the encoder for a keyframe now (stock ak_venc_request_idr: ioctl
+ * 0x400456f3 -> AKV_Encoder_Set_EncIFrame). Used when a viewer, RTSP client
+ * or recording starts, so long smart GOPs never make anyone wait. At most
+ * one per second. */
+void venc_request_idr(void)
+{
+    static int64_t last;
+    int64_t now = mono_ms();
+    if (!g_smart_used || g_chn0_fd < 0 || now - last < 1000) return;
+    last = now;
+    uint32_t chn = 0;
+    if (ioctl(g_chn0_fd, VENC_IOCTL_REQUEST_IDR, &chn) < 0) perror("[venc] request IDR");
+}
+
 int venc_create_encoder(void)
 {
+    int kbps = g_kbps_used, gop = g_gop_used;
     struct venc_create_enc_req req;
     memset(&req, 0, sizeof(req));
 
     req.chn_id               = 0;
-    req.enc.codec_type_code  = H264_PROFILE_IDC_MAIN;
+    req.enc.codec_type_code  = venc_profile();
     req.enc.chroma_mode      = 1;    /* CHROMA_4_2_0 */
     req.enc.width            = ENC_WIDTH;
     req.enc.height           = ENC_HEIGHT;
@@ -226,16 +374,18 @@ int venc_create_encoder(void)
      * values below, per the crash history below. */
     req.enc.rc_mode          = VENC_RC_VBRP;
     req.enc.fps              = ENC_FPS;
-    req.enc.goplen           = ENC_GOP;
+    g_kbps_used = kbps; g_gop_used = gop;
+    req.enc.goplen           = (uint16_t)gop;
     req.enc.max_fps          = 0;    /* stock sends 0 for both channels (isp_hook_n.log) */
     req.enc.enc_level        = 40;   /* H.264 Level 4.0 */
     req.enc.qp_or_kbps       = 28;   /* VBR+: minqp (stock isp_hook_n.log capture) */
     req.enc.qp2              = 43;   /* VBR+: maxqp */
-    req.enc.max_kbps_vbrp    = 1536; /* VBR+: max_kbps */
+    req.enc.max_kbps_vbrp    = (uint32_t)kbps; /* VBR+: max_kbps (stock 1536) */
     req.enc.initqp_vbrp      = 99;   /* VBR+: initqp — the "99" belongs here, not qp_or_kbps */
-    req.smart.smart_mode     = 0;
-    req.smart.smart_goplen   = 100;
-    req.smart.smart_quality  = 50;
+    req.smart.smart_mode     = (int16_t)g_smart_used;   /* same value QUERY_DMA sized the pool for */
+    req.smart.smart_goplen   = g_smart_used ? SMART_GOPLEN : 100;
+    req.smart.smart_quality  = g_smart_used ? SMART_QUALITY : 50;
+    req.smart.smart_static_value = g_smart_used ? SMART_STATIC : 0;
     /* REVERTED (2026-07-04) — hardware-tested and CRASHES THE KERNEL.
      * A Ghidra trace of venc_check_and_format_rc_param (0x1d0a58) and its
      * caller ht_video_codec_start_encode (0xbef60) appeared to show stock

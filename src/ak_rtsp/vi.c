@@ -63,6 +63,52 @@
 #define SUB_FRAME_BYTES   (SUB_WIDTH * SUB_HEIGHT * 3 / 2)
 #define TD_FRAME_BYTES    (TD_WIDTH  * TD_HEIGHT  * 3 / 2)
 
+/* TD channel (unused by the pipeline) is repurposed as a 3x "zoom" for QR
+ * scanning: native-resolution 640x360 centre crop instead of the full frame
+ * scaled to 320x180. Every step falls back to the original configuration if
+ * the hardware rejects it, so video never depends on this. */
+#define TD_ZOOM_LEFT 640
+#define TD_ZOOM_TOP  352
+static int      g_td_zoom;
+static int      g_td_w = TD_WIDTH, g_td_h = TD_HEIGHT;
+static uint32_t g_td_frame = TD_FRAME_BYTES;
+
+static int td_configure(int fd, int zoom)
+{
+    struct vi_cmd_wrapper cmd;
+    struct vi_fmt_wrapper fmt;
+    struct vi_crop_req    crop;
+    int w = zoom ? SUB_WIDTH : TD_WIDTH, h = zoom ? SUB_HEIGHT : TD_HEIGHT;
+
+    memset(&crop, 0, sizeof(crop));
+    crop.flag = 1;
+    crop.left = zoom ? TD_ZOOM_LEFT : 0;
+    crop.top  = zoom ? TD_ZOOM_TOP : 0;
+    crop.width  = zoom ? SUB_WIDTH : ENC_WIDTH;
+    crop.height = zoom ? SUB_HEIGHT : ENC_HEIGHT;
+    if (ioctl(fd, VI_IOCTL_S_CROP, &crop) < 0) { perror("VI S_CROP (TD)"); return -1; }
+
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.flag = 1; fmt.width = (uint32_t)w; fmt.height = (uint32_t)h;
+    fmt.pixelformat = VI_PIXFMT_NV12; fmt.field = 4;
+    if (ioctl(fd, VI_IOCTL_S_FMT, &fmt) < 0) { perror("VI S_FMT (TD)"); return -1; }
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.flag = 1; cmd.inner_cmd = VI_INNER_BUF_SIZE; cmd.value = zoom ? SUB_BUF_SIZE : TD_BUF_SIZE;
+    if (ioctl(fd, VI_IOCTL_TUNNEL, &cmd) < 0) { perror("VI buf_size (TD)"); return -1; }
+
+    g_td_zoom = zoom;
+    g_td_w = w; g_td_h = h;
+    g_td_frame = (uint32_t)(w * h * 3 / 2);
+    printf("[ak_rtsp] VI TD:   mode=FRAME crop=%dx%d@%d,%d fmt=%dx%d (%s)\n",
+           zoom ? SUB_WIDTH : ENC_WIDTH, zoom ? SUB_HEIGHT : ENC_HEIGHT,
+           zoom ? TD_ZOOM_LEFT : 0, zoom ? TD_ZOOM_TOP : 0, w, h,
+           zoom ? "QR zoom" : "original");
+    return 0;
+}
+
+int vi_td_zoom_active(void) { return g_td_zoom; }
+
 static int setup_channel_attrs(int fd, int is_main)
 {
     struct vi_cmd_wrapper    cmd;
@@ -177,7 +223,7 @@ static int setup_channel_attrs(int fd, int is_main)
                SUB_WIDTH, SUB_HEIGHT, SUB_BUF_SIZE);
 
     } else {
-        /* --- TD channel: done_mode=FRAME, CROPCAP, S_CROP full, S_FMT 320x180 --- */
+        /* --- TD channel: done_mode=FRAME, CROPCAP, then zoom or original --- */
         memset(&cmd, 0, sizeof(cmd));
         cmd.flag = 1; cmd.inner_cmd = VI_INNER_DONE_MODE; cmd.value = 0;
         ioctl(fd, VI_IOCTL_TUNNEL, &cmd);
@@ -186,28 +232,11 @@ static int setup_channel_attrs(int fd, int is_main)
         crop_cap[0] = 1;
         ioctl(fd, VI_IOCTL_G_CROP_CAP, crop_cap);
 
-        memset(&crop, 0, sizeof(crop));
-        crop.flag = 1; crop.left = 0; crop.top = 0;
-        crop.width = ENC_WIDTH; crop.height = ENC_HEIGHT;  /* full sensor */
-        if (ioctl(fd, VI_IOCTL_S_CROP, &crop) < 0) {
-            perror("VI S_CROP (TD)"); return -1;
+        if (td_configure(fd, 1) != 0) {
+            printf("[ak_rtsp] VI TD: QR zoom rejected, using original configuration\n");
+            if (td_configure(fd, 0) != 0) return -1;
         }
-
-        memset(&fmt, 0, sizeof(fmt));
-        fmt.flag = 1; fmt.width = TD_WIDTH; fmt.height = TD_HEIGHT;
-        fmt.pixelformat = VI_PIXFMT_NV12; fmt.field = 4;
-        if (ioctl(fd, VI_IOCTL_S_FMT, &fmt) < 0) {
-            perror("VI S_FMT (TD)"); return -1;
-        }
-
-        memset(&cmd, 0, sizeof(cmd));
-        cmd.flag = 1; cmd.inner_cmd = VI_INNER_BUF_SIZE; cmd.value = TD_BUF_SIZE;
-        if (ioctl(fd, VI_IOCTL_TUNNEL, &cmd) < 0) {
-            perror("VI buf_size (TD)"); return -1;
-        }
-
-        printf("[ak_rtsp] VI TD:   mode=FRAME crop=1920x1080 fmt=%ux%u buf=%u\n",
-               TD_WIDTH, TD_HEIGHT, TD_BUF_SIZE);
+        (void)fmt; (void)crop;
     }
 
     return 0;
@@ -286,6 +315,22 @@ int vi_grab_sub_frame(const char *path)
     }
 
     return f ? 0 : -1;
+}
+
+/* Copy the latest 640x360 NV12 sub-channel frame for the web snapshot.
+ * Uses the same direct DMA-buffer read as vi_grab_sub_frame()'s fallback
+ * path (the AK VI driver keeps writing into the mmap'd buffer after
+ * STREAMON; DQBUF never succeeds on this channel), so it never blocks and
+ * never touches buffer queue state. The frame may tear if the ISP is mid-
+ * write — acceptable for a preview snapshot. Returns bytes copied or -1. */
+int vi_copy_sub_frame(uint8_t *dst, size_t cap, int *w, int *h)
+{
+    if (cap < SUB_FRAME_BYTES || !g_vi_sub_bufs[0] || g_vi_sub_bufs[0] == MAP_FAILED)
+        return -1;
+    memcpy(dst, g_vi_sub_bufs[0], SUB_FRAME_BYTES);
+    *w = SUB_WIDTH;
+    *h = SUB_HEIGHT;
+    return SUB_FRAME_BYTES;
 }
 
 int vi_set_channel_attr(void)
@@ -400,7 +445,24 @@ int vi_start_capture(void)
 
     if (setup_channel_bufs(g_vid_td, VI_TD_BUF_COUNT,
                             g_vi_td_bufs, g_vi_td_buf_sizes, NULL,
-                            TD_FRAME_BYTES, "TD") < 0) return -1;
+                            g_td_frame, "TD") < 0) {
+        if (!g_td_zoom) return -1;
+        /* Zoomed buffers failed: release them, revert, retry original. */
+        printf("[ak_rtsp] VI TD: zoom buffers failed, reverting to original\n");
+        for (int i = 0; i < VI_TD_BUF_COUNT; i++) {
+            if (g_vi_td_bufs[i] && g_vi_td_bufs[i] != MAP_FAILED)
+                munmap(g_vi_td_bufs[i], g_vi_td_buf_sizes[i]);
+            g_vi_td_bufs[i] = NULL;
+        }
+        struct vi_reqbufs rb;
+        memset(&rb, 0, sizeof(rb));
+        rb.count = 0; rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; rb.memory = V4L2_MEMORY_MMAP;
+        ioctl(g_vid_td, VI_IOCTL_REQBUFS, &rb);
+        if (td_configure(g_vid_td, 0) != 0) return -1;
+        if (setup_channel_bufs(g_vid_td, VI_TD_BUF_COUNT,
+                                g_vi_td_bufs, g_vi_td_buf_sizes, NULL,
+                                g_td_frame, "TD") < 0) return -1;
+    }
 
     /* STREAMON in order: main, sub, TD — all before any VENC open.
      * This fires b2i_pp_chn_init in ak_isp.ko for each channel.
@@ -421,4 +483,17 @@ int vi_start_capture(void)
     printf("[ak_rtsp] VI TD STREAMON OK (all three channels running, b2i_pp_chn_init fired)\n");
 
     return 0;
+}
+
+/* Luminance of the zoomed TD frame (centre crop) for QR scanning. Returns
+ * bytes copied (w*h) or -1 when zoom is not active. Direct DMA peek like
+ * vi_copy_sub_frame(). */
+int vi_copy_td_luma(uint8_t *dst, size_t cap, int *w, int *h)
+{
+    size_t n = (size_t)g_td_w * (size_t)g_td_h;
+    if (!g_td_zoom || cap < n || !g_vi_td_bufs[0] || g_vi_td_bufs[0] == MAP_FAILED) return -1;
+    memcpy(dst, g_vi_td_bufs[0], n);
+    *w = g_td_w;
+    *h = g_td_h;
+    return (int)n;
 }

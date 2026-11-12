@@ -45,3 +45,6 @@ void ae_get_tuning(ae_tuning_t *out);
  * ISP fd isn't ready yet — a later ae_setup()/manual retry will pick them
  * up). */
 int ae_set_tuning(const ae_tuning_t *in);
+int  ae_tnr_state(void);   /* 3D NR reference frames: 1 on, 0 off, -1 skipped by the crash guard */
+void ae_tnr_confirm(void); /* encoder ran with TNR on: drop the crash-guard marker */
+void ae_tnr_retry(void);   /* forget a guard skip: TNR is tried again at the next start */

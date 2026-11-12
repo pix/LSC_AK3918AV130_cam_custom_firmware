@@ -1,0 +1,10 @@
+Upstream: https://github.com/dlbeer/quirc
+Commit:   f2e4271ae43a15d9263704e07bc86cba5697d74d (2026-10-28)
+Files copied unmodified from lib/ (ISC licence, see LICENSE). sha256:
+d4468c55ecd0d2f905a6813513708005e6d609ef0a3d32a17673313c7552a7c1  decode.c
+adf6675f19dccbab1b247af8c873ca5c4a9ad6fcd6e7085a1f1f41f5509c5822  identify.c
+08bc9d3ff87c1a031b85b2f52f0847e54e92df3dd53f7bc19a2c515116a8ce7b  quirc.c
+6764aa2f245085080e1e5cefd9dcd59b9727718a0d4606956e0502a57f5dff30  version_db.c
+49660ea710add2d6f304a1323f53190f5a2bf34db4dd160d633db0c3f22bfba5  quirc.h
+75bfd30b544fc94f63fbc36ac968db528b861586dac9dc6d0250886935082272  quirc_internal.h
+a70ef3ea032998eead2e2c7573a170a809eae08e3ca134611f707eda5932c8a9  LICENSE

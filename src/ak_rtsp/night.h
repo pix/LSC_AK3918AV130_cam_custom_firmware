@@ -39,3 +39,17 @@ void night_set_tuning(const night_tuning_t *in);
 /* Current actual day/night state (1=night, 0=day) — distinct from
  * night_tuning_t.override, which is the requested mode, not the applied one. */
 int night_is_night(void);
+/* Adaptive frame rate: idle rate (2..14, 0 = off) used after 10 s without
+ * motion and with no web viewer; full rate again on motion. */
+void night_set_idle_fps(int fps);
+void night_set_idle_wake_all(int all);   /* 1: motion anywhere wakes it, 0: only in motion zones */
+int  night_fps_now(void);
+
+/* Registers night.algo (stock|exposure). Call before settings are loaded. */
+void night_init(void);
+/* Scene light from the AE state (stock EV formula; bigger = darker), its
+ * 0..100 % log-scale level (-1 until measured; includes IR light at night),
+ * and the share of blocks lit by visible light (non-IR ratio, -1 unknown). */
+int night_ev(void);
+int night_light_pct(void);
+int night_non_ir_ratio(void);

@@ -1,0 +1,202 @@
+diff --git i/firmware/src/ak_rtsp/Makefile w/firmware/src/ak_rtsp/Makefile
+index 2ed7dc5..cb7bbfe 100644
+--- i/firmware/src/ak_rtsp/Makefile
++++ w/firmware/src/ak_rtsp/Makefile
+@@ -6,7 +6,7 @@ CFLAGS  = -std=gnu99 -mfloat-abi=soft -O2 -Wall -g -ffp-contract=off \
+           -I../smolrtsp/build/_deps/datatype99-src \
+           -I../smolrtsp/build/_deps/interface99-src \
+           -I../smolrtsp/build/_deps/metalang99-src/include \
+-          -DSMOLRTSP_WITH_H264 \
++          -DSMOLRTSP_WITH_H264 -DSMOLRTSP_WITH_H265 \
+           -Ithird_party/mbedtls/include -DMBEDTLS_CONFIG_FILE='"tls_config.h"'
+ LDFLAGS = -pthread -static
+ 
+@@ -109,7 +109,8 @@ SRCS    = main.c \
+           $(wildcard ../smolrtsp/src/types/*.c) \
+           $(wildcard ../smolrtsp/src/writer/*.c) \
+           $(wildcard ../smolrtsp/src/transport/*.c) \
+-          ../smolrtsp/src/nal/h264.c
++          ../smolrtsp/src/nal/h264.c \
++          ../smolrtsp/src/nal/h265.c
+ OBJS    = $(SRCS:.c=.o) $(ASM_SRCS:.S=.o)
+ 
+ all: $(TARGET) $(TARGET_DBG) $(TARGET_HOOK) $(TARGET_TOOL) $(TARGET_DIV0)
+diff --git i/firmware/src/ak_rtsp/ak_ioctls.h w/firmware/src/ak_rtsp/ak_ioctls.h
+index 2f41ae6..9e5b873 100644
+--- i/firmware/src/ak_rtsp/ak_ioctls.h
++++ w/firmware/src/ak_rtsp/ak_ioctls.h
+@@ -175,7 +175,13 @@ struct vi_crop_req {       /* 20 bytes — VI_IOCTL_S_CROP */
+ #define H264_PROFILE_IDC_MAIN        77   /* standard H.264 Main profile_idc    */
+ #define H264_PROFILE_IDC_HIGH       100   /* standard H.264 High profile_idc    */
+ #define H264_PROFILE_IDC_BASELINE    66   /* standard H.264 Baseline profile_idc */
+-#define H264_PROFILE_IDC_CONSTHI   0x242  /* Constrained High                   */
++#define H264_PROFILE_IDC_CONSTHI   0x242  /* really AVC Constrained Baseline: 66 | 0x0002 << 8 (Allegro AL_PROFILE_AVC_C_BASELINE) */
++/* Allegro DVT profile word (Xilinx vcu-ctrl-sw lib_common/Profiles.h, same IP
++ * as ak_venc_adapter.ko): codec << 24 | flags << 8 | profile_idc, codec 0 =
++ * AVC, 1 = HEVC, 4 = JPEG. The driver reads the codec from the top byte
++ * (AKV_Encoder_Open_Ext, AKV_Encoder_Get_Dma_Memory_Info: 32x32 CTB sizing).
++ * SDK ak_venc.h: PROFILE_HEVC_MAIN, rc.cub_size 0 = 32x32 CU, levels x10. */
++#define HEVC_PROFILE_MAIN       0x1000001 /* AL_PROFILE_HEVC_MAIN                */
+ #define JPEG_CODEC_CODE         0x4000000 /* JPEG mode (enc_out_type=1)         */
+ 
+ /* Kernel RC mode (venc_enc_cfg.rc_mode) — different from user-facing br_mode */
+diff --git i/firmware/src/ak_rtsp/rtsp.c w/firmware/src/ak_rtsp/rtsp.c
+index 03419fa..0dc0ed2 100644
+--- i/firmware/src/ak_rtsp/rtsp.c
++++ w/firmware/src/ak_rtsp/rtsp.c
+@@ -130,6 +130,7 @@ typedef struct {
+     bool          subscribed;
+     bool          pcmu;        /* audio codec chosen at DESCRIBE */
+     bool          sub;         /* rtsp://camera/sub: 640x360 second stream (video.sub) */
++    bool          hevc;        /* main stream encoded as H.265 (video.codec), chosen at DESCRIBE */
+     uint32_t      sub_cur;
+     /* ONVIF audio backchannel (talk from go2rtc / Home Assistant / NVRs):
+      * the client sends G.711 RTP on this interleaved channel (-1 = none). */
+@@ -316,6 +317,7 @@ static void Client_describe(VSelf, SmolRTSP_Context *ctx, const SmolRTSP_Request
+             return;
+         }
+         self->sub_cur = 0;
++        self->hevc = !self->sub && venc_is_hevc();
+     }
+     self->pcmu = g_audio_pcmu;
+     if (self->pcmu) snprintf(audio_fmt, sizeof(audio_fmt), "m=audio 0 RTP/AVP 0\r\nc=IN IP4 0.0.0.0\r\na=rtpmap:0 PCMU/8000\r\n");
+@@ -333,13 +335,15 @@ static void Client_describe(VSelf, SmolRTSP_Context *ctx, const SmolRTSP_Request
+         "t=0 0\r\n"
+         "m=video 0 RTP/AVP 96\r\n"
+         "c=IN IP4 0.0.0.0\r\n"
+-        "a=rtpmap:96 H264/90000\r\n"
+-        "a=fmtp:96 packetization-mode=1\r\n"
++        "%s"
+         "a=control:streamid=0\r\n"
+         "%s"
+         "a=control:streamid=1\r\n"
+         "%s",
+-        (unsigned long long)time(NULL), (unsigned long long)time(NULL), audio_fmt, bc);
++        (unsigned long long)time(NULL), (unsigned long long)time(NULL),
++        self->hevc ? "a=rtpmap:96 H265/90000\r\n"                      /* RFC 7798 */
++                   : "a=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\n",
++        audio_fmt, bc);
+ 
+     smolrtsp_header(ctx, SMOLRTSP_HEADER_CONTENT_TYPE, "application/sdp");
+     smolrtsp_body(ctx, CharSlice99_from_str(sdp_buf));
+@@ -516,7 +520,24 @@ static int send_frame_nalus(Client *client, uint8_t *data, size_t len,
+             }
+ 
+             size_t nalu_len = next_nalu_start - nalu_start;
+-            if (nalu_len > 0) {
++            if (client->hevc && nalu_len > 2) {
++                /* H.265: 2-byte NAL header, VCL = types 0..31 (RFC 7798
++                 * FU fragmentation in SmolRTSP's transport) */
++                SmolRTSP_H265NalHeader h265_hdr =
++                    SmolRTSP_H265NalHeader_parse(data + nalu_start);
++                SmolRTSP_NalUnit nalu = {
++                    .header  = SmolRTSP_NalHeader_H265(h265_hdr),
++                    .payload = U8Slice99_new(data + nalu_start + 2, nalu_len - 2),
++                };
++                if (SmolRTSP_NalTransport_send_packet(
++                        client->nal_transport,
++                        SmolRTSP_RtpTimestamp_Raw(timestamp),
++                        h265_hdr.unit_type < 32, nalu) == -1) {
++                    if (!failed) perror("send RTP/NAL");
++                    failed = 1;
++                    if (client->is_tcp) return -1;
++                }
++            } else if (!client->hevc && nalu_len > 0) {
+                 uint8_t nalu_type = data[nalu_start] & 0x1F;
+                 SmolRTSP_H264NalHeader h264_hdr =
+                     SmolRTSP_H264NalHeader_parse(data[nalu_start]);
+diff --git i/firmware/src/ak_rtsp/venc.c w/firmware/src/ak_rtsp/venc.c
+index c94a6ca..14f790b 100644
+--- i/firmware/src/ak_rtsp/venc.c
++++ w/firmware/src/ak_rtsp/venc.c
+@@ -104,7 +104,33 @@ static int vp_set(const char *v, const char **e)
+     else { *e = "must be main or high (takes effect after a restart)"; return -1; }
+     return 0;
+ }
+-static uint32_t venc_profile(void) { return s_vprofile ? H264_PROFILE_IDC_HIGH : H264_PROFILE_IDC_MAIN; }
++/* video.codec: h264 (default) or h265 (main stream only; the sub stream and
++ * snapshots are unaffected). Experimental: off by default. Crash guard: a
++ * marker is written before the HEVC encoder is created and removed once
++ * frames flow (venc_startup_ok). If the camera restarts with the marker
++ * still there, HEVC crashed or hung it, and every later start uses H.264
++ * until h265 is selected again (which clears the marker). */
++#define HEVC_GUARD "/etc/config/ak_rtsp_hevc_guard"
++static char g_venc_note[96];             /* defined with the stream settings below */
++static int s_vcodec;                      /* setting: 0 = h264, 1 = h265 */
++static int g_hevc;                        /* the encoder actually runs HEVC */
++static int g_hevc_guarded;
++static int vc_get(char *o, size_t c) { snprintf(o, c, "%s", s_vcodec ? "h265" : "h264"); return 0; }
++static int vc_set(const char *v, const char **e)
++{
++    if (!strcmp(v, "h264")) s_vcodec = 0;
++    else if (!strcmp(v, "h265")) {
++        if (!s_vcodec) unlink(HEVC_GUARD);   /* chosen again: allow a new attempt */
++        s_vcodec = 1;
++    } else { *e = "must be h264 or h265 (takes effect after a restart)"; return -1; }
++    return 0;
++}
++int venc_is_hevc(void) { return g_hevc; }
++static uint32_t venc_profile(void)
++{
++    if (g_hevc) return HEVC_PROFILE_MAIN;
++    return s_vprofile ? H264_PROFILE_IDC_HIGH : H264_PROFILE_IDC_MAIN;
++}
+ 
+ static uint32_t venc_query_ring_pool_size(void)
+ {
+@@ -161,6 +187,20 @@ int venc_create_pool(void)
+     char vp[8] = "";                          /* saved before settings are replayed */
+     if (control_saved_get("video.profile", vp, sizeof vp) == 0) s_vprofile = !strcmp(vp, "high");
+     if (s_vprofile) printf("[venc] H.264 High profile\n");
++    char vc[8] = "";
++    if (control_saved_get("video.codec", vc, sizeof vc) == 0 && !strcmp(vc, "h265")) {
++        s_vcodec = 1;                     /* so the settings replay does not clear the marker */
++        if (access(HEVC_GUARD, F_OK) == 0) {
++            snprintf(g_venc_note, sizeof g_venc_note,
++                     "H.265 did not start last time: using H.264 (choose H.264, then H.265 to retry)");
++            fprintf(stderr, "[venc] %s\n", g_venc_note);
++        } else {
++            int gfd = open(HEVC_GUARD, O_WRONLY | O_CREAT | O_TRUNC, 0600);
++            if (gfd >= 0) { fsync(gfd); close(gfd); sync(); }
++            g_hevc = 1; g_hevc_guarded = 1;
++            printf("[venc] H.265 (HEVC Main) main stream, guarded\n");
++        }
++    }
+ 
+     uint32_t ring_size = venc_query_ring_pool_size();
+ 
+@@ -234,6 +274,7 @@ void venc_register_params(void)
+     CTRL_REG("venc.kbps", p_kbps, CTRL_PERSIST);
+     CTRL_REG("venc.gop", p_gop, CTRL_PERSIST);
+     CTRL_REG("video.profile", vp, CTRL_PERSIST);
++    CTRL_REG("video.codec", vc, CTRL_PERSIST);
+ }
+ const char *venc_note(void) { return g_venc_note; }
+ static int g_kbps_used = 1536, g_gop_used = ENC_GOP;
+@@ -242,6 +283,7 @@ int venc_gop_now(void) { return g_gop_used; }
+ void venc_startup_ok(void)
+ {
+     if (g_guarded) { unlink(VENC_GUARD); sync(); g_guarded = 0; }
++    if (g_hevc_guarded) { unlink(HEVC_GUARD); sync(); g_hevc_guarded = 0; printf("[venc] H.265 running: crash guard cleared\n"); }
+ }
+ 
+ int venc_create_encoder(void)
+diff --git i/firmware/src/ak_rtsp/venc.h w/firmware/src/ak_rtsp/venc.h
+index 67ceb8e..0528f48 100644
+--- i/firmware/src/ak_rtsp/venc.h
++++ w/firmware/src/ak_rtsp/venc.h
+@@ -7,7 +7,8 @@ void venc_reset_stale_channel(void);
+ /* VENC_IOCTL_QUERY_DMA → CREATE_POOL (ring) → CREATE_POOL (ext) → mmap. */
+ int venc_create_pool(void);
+ 
+-/* VENC_IOCTL_CREATE_ENC — configure H.264 Main 1920×1080 encoder. */
++/* VENC_IOCTL_CREATE_ENC — configure the 1920×1080 encoder (H.264, or H.265
++ * when video.codec=h265 and its crash guard allows it). */
+ int venc_create_encoder(void);
+ 
+ /* VENC_IOCTL_BIND_VI_CHN — bind encoder channel 0 to VI channel 0 (kernel mode). */
+@@ -22,3 +23,4 @@ void venc_startup_ok(void);        /* first frames streamed: clear the crash gua
+ const char *venc_note(void);       /* non-empty if custom settings were skipped */
+ int  venc_kbps_now(void);          /* values the running encoder was created with */
+ int  venc_gop_now(void);
++int  venc_is_hevc(void);           /* the running main stream is H.265 */

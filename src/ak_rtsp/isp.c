@@ -3,6 +3,8 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <pthread.h>
+#include <math.h>
 
 #include "ak_rtsp.h"
 #include "ak_ioctls.h"
@@ -448,7 +450,7 @@ int isp_set_saturation(int value /* -50..50 */)
     }
     int target = (value < 0) ? (g_saturation_baseline + value)
                               : (g_saturation_baseline + value * 3);
-    if (target > 254) target = 254;
+    if (target > 255) target = 255;                  /* stock: movge 255 */
     if (target < 0)   target = 0;
     *field = (int16_t)target;
     return isp_tunnel(ISP_INNER_EFFECT, buf);
@@ -503,29 +505,22 @@ int isp_set_contrast(int value /* -50..50 */)
  * the SAME struct ae.c's AE thread polls continuously via GET_EXPOSURE — not
  * the small effect struct saturation/contrast use.
  *
- * Verified at the DISASSEMBLY level, not just decompiled C: Ghidra's
- * decompiler badly conflated two different source offsets here (0x13c vs
- * 0x3c relative to a cached copy of the struct's "public" section), enough
- * that a decompile-only reading would have been wrong in a second way beyond
- * the type-0-vs-type-1 mixup already documented above. Confirmed via real
- * ARM load/store instructions:
- *   - A single "primary" target value at absolute struct offset 0x58,
- *     whose BASELINE is read from a DIFFERENT, seemingly-permanent
- *     reference field at offset 0x158 (anyka_ipc never appears to write
- *     0x158 itself — it looks like a static "factory default target"
- *     baked in from sensor_isp.conf, while 0x58 is the "active target" the
- *     running AE algorithm actually consults).
- *   - A 14-entry int32 table at offsets 0x5c..0x90, whose baseline is EACH
- *     ENTRY'S OWN pre-modification value (same self-referential
- *     baseline-once pattern as saturation/contrast) — read and written at
- *     the exact same 14 locations.
- *   - Both are updated as baseline+delta clamped to >=0 (a bitwise
- *     "AND NOT (arithmetic-shift-right-31)" idiom = clamp-negative-to-zero).
- *   - A `(new_primary * <some other field>) / <unidentified>` computation
- *     also appears in the original function but is NOT replicated here:
- *     traced its result to a dead stack slot never read again before the
- *     function returns — confirmed it cannot affect anything sent to
- *     hardware, so omitting it changes nothing observable.
+ * Re-verified 2026-11-12 against the disassembly of this camera's anyka_ipc
+ * (type-1 handler at 0x12af18, called from isp_set_effect @ 0x12c600).
+ * On its first call it caches 0x704 bytes of the struct starting at offset
+ * 0x1c (cache 0x5f3644 + dev*0x704). Each call then GETs a fresh struct
+ * and changes:
+ *   - 0x58 (AE target): cached_0x58 + value, clamped to >= 0. The baseline
+ *     is cache+0x3c, which is struct offset 0x58 itself. An earlier reading
+ *     took it from 0x158 (base 0x5f3544 + 0x13c, misread as relative to the
+ *     cache), and measuring showed -50 giving the brightest picture.
+ *   - 0x40: cached_0x40 * new_0x58 / cached_0x58 (__aeabi_idiv), stored
+ *     into the outgoing struct (sp+0x768 = buffer+0x40). It is not a dead
+ *     slot.
+ *   - 15 int32 entries at 0x5c..0x94 inclusive: each cached value + value,
+ *     clamped to >= 0 (bic r,r,r,asr#31). The loop stops after storing at
+ *     buffer+0x94.
+ * Then SET_EXPOSURE.
  *
  * SAFETY: ae.c's steady-state loop only ever calls GET_EXPOSURE (read-only,
  * per its own design), never writes back, so
@@ -535,13 +530,14 @@ int isp_set_contrast(int value /* -50..50 */)
  * handles one client command at a time on a single thread. If that
  * threading model ever changes, this needs a mutex around the sequence. */
 #define EXPO_BUF_SIZE               0x720
-#define BRIGHTNESS_PRIMARY_OFF      0x58   /* active target, written every call */
-#define BRIGHTNESS_PRIMARY_REF_OFF  0x158  /* permanent reference, read-only baseline source */
-#define BRIGHTNESS_TABLE_OFF        0x5c   /* 14-entry table, self-referential baseline */
-#define BRIGHTNESS_TABLE_COUNT      14
+#define BRIGHTNESS_TARGET_OFF   0x58   /* AE target */
+#define BRIGHTNESS_SCALED_OFF   0x40   /* scaled by new/old target */
+#define BRIGHTNESS_TABLE_OFF    0x5c   /* 15 entries, 0x5c..0x94 */
+#define BRIGHTNESS_TABLE_COUNT  15
 
 static int     g_brightness_baseline_valid = 0;
-static int32_t g_brightness_primary_baseline;
+static int32_t g_brightness_target_baseline;
+static int32_t g_brightness_scaled_baseline;
 static int32_t g_brightness_table_baseline[BRIGHTNESS_TABLE_COUNT];
 
 static int32_t clamp_nonneg(int32_t v) { return v < 0 ? 0 : v; }
@@ -553,14 +549,21 @@ int isp_set_brightness(int value /* -50..50 */)
     if (isp_tunnel(ISP_INNER_GET_EXPOSURE, buf) != 0) return -1;
 
     if (!g_brightness_baseline_valid) {
-        g_brightness_primary_baseline = *(int32_t *)(buf + BRIGHTNESS_PRIMARY_REF_OFF);
+        g_brightness_target_baseline = *(int32_t *)(buf + BRIGHTNESS_TARGET_OFF);
+        g_brightness_scaled_baseline = *(int32_t *)(buf + BRIGHTNESS_SCALED_OFF);
         for (int i = 0; i < BRIGHTNESS_TABLE_COUNT; i++)
             g_brightness_table_baseline[i] = *(int32_t *)(buf + BRIGHTNESS_TABLE_OFF + i * 4);
         g_brightness_baseline_valid = 1;
+        printf("[isp] brightness baseline: target=%d field40=%d table0=%d\n",
+               (int)g_brightness_target_baseline, (int)g_brightness_scaled_baseline,
+               (int)g_brightness_table_baseline[0]);
     }
 
-    *(int32_t *)(buf + BRIGHTNESS_PRIMARY_OFF) =
-        clamp_nonneg(g_brightness_primary_baseline + value);
+    int32_t target = clamp_nonneg(g_brightness_target_baseline + value);
+    *(int32_t *)(buf + BRIGHTNESS_TARGET_OFF) = target;
+    if (g_brightness_target_baseline > 0)            /* stock divides unguarded */
+        *(int32_t *)(buf + BRIGHTNESS_SCALED_OFF) =
+            (int32_t)((int64_t)target * g_brightness_scaled_baseline / g_brightness_target_baseline);
     for (int i = 0; i < BRIGHTNESS_TABLE_COUNT; i++)
         *(int32_t *)(buf + BRIGHTNESS_TABLE_OFF + i * 4) =
             clamp_nonneg(g_brightness_table_baseline[i] + value);
@@ -601,14 +604,16 @@ int isp_set_brightness(int value /* -50..50 */)
  *       iVar10,>>8,  clamp 255:     offsets 0x648, 0x64c, 0x656, 0x65a,
  *                                   0x660, 0x664, 0x66a, 0x66e
  *
- * NOT implemented: a repeated 16-group sub-block (stride 0xab4, offsets
- * 0x112c+/0x132c+ each holding another 256-entry kernel plus ~13 more
- * scalar fields, same 4 scale factors and clamp rules) — these are
- * per-lighting-condition ("gain bucket") sharpening tables, a secondary
- * refinement layered on top of the primary kernel above, not the dominant
- * visual effect. Left as a known gap rather than risk further transcription
- * errors on ~200 more field writes in one pass — revisit if the slider
- * turns out to need finer control than the primary kernel alone provides.
+ * The same layout repeats 16 more times with a stride of 0xab4 (per-gain
+ * tables). Re-verified 2026-11-12 against this camera's anyka_ipc (case 4
+ * of isp_set_effect @ 0x12c84c, loop 0x12ce04..0x12d3e4 runs until the
+ * offset reaches 0xab40 = 16 * 0xab4). The loop's kernels are at
+ * 0x112c/0x132c and its first field is at 0x10f6, each being the
+ * offset above + 0xab4. The fields use the same factors, shifts and clamps.
+ * The AE runs in linkage mode, so the ISP uses these per-gain blocks: with
+ * only block 0 rescaled, sharpness measured flat from -50 to +50.
+ * The last block ends at 0x642 + 16*0xab4 + 0x436 = 0xb5b8, which is inside
+ * the 0xb5f8 blob.
  *
  * Baseline blob is fetched fresh via GET_SHARP on first call and cached —
  * same one-time-baseline-then-rescale-from-it pattern as anyka_ipc's own
@@ -658,37 +663,125 @@ int isp_set_sharpness(int value /* -50..50 */)
     int32_t ivar9  = (v100 * 255)  / 50;        /* 0..510,  255  = neutral */
     int32_t ivar10 = ((50 - value) * 255) / 50; /* 510..0,  255  = neutral */
 
-    int16_t *kernel_a = (int16_t *)(buf + 0x678);
-    int16_t *kernel_b = (int16_t *)(buf + 0x878);
-    int16_t *base_a   = (int16_t *)(g_sharp_baseline + 0x678);
-    int16_t *base_b   = (int16_t *)(g_sharp_baseline + 0x878);
-    for (int i = 0; i < 256; i++) {
-        kernel_a[i] = sharp_kernel_scale(base_a[i], ivar7);
-        kernel_b[i] = sharp_kernel_scale(base_b[i], ivar7);
-    }
-
-    static const int iVar8_offs[] = { 0x642, 0x650, 0x65e, 0x668 };
-    for (size_t i = 0; i < sizeof(iVar8_offs)/sizeof(iVar8_offs[0]); i++) {
-        int off = iVar8_offs[i];
-        *(uint16_t *)(buf + off) = sharp_field_scale(*(uint16_t *)(g_sharp_baseline + off), ivar8, 4, 15);
-    }
-
-    static const int iVar9_offs[] = { 0x64a, 0x64e, 0x658, 0x65c, 0x662, 0x666, 0x66c, 0x670 };
-    for (size_t i = 0; i < sizeof(iVar9_offs)/sizeof(iVar9_offs[0]); i++) {
-        int off = iVar9_offs[i];
-        *(uint16_t *)(buf + off) = sharp_field_scale(*(uint16_t *)(g_sharp_baseline + off), ivar9, 8, 255);
-    }
-
+    static const int iVar8_offs[]  = { 0x642, 0x650, 0x65e, 0x668 };
+    static const int iVar9_offs[]  = { 0x64a, 0x64e, 0x658, 0x65c, 0x662, 0x666, 0x66c, 0x670 };
     static const int iVar10_offs[] = { 0x648, 0x64c, 0x656, 0x65a, 0x660, 0x664, 0x66a, 0x66e };
-    for (size_t i = 0; i < sizeof(iVar10_offs)/sizeof(iVar10_offs[0]); i++) {
-        int off = iVar10_offs[i];
-        *(uint16_t *)(buf + off) = sharp_field_scale(*(uint16_t *)(g_sharp_baseline + off), ivar10, 8, 255);
+    for (int blk = 0; blk < 17; blk++) {             /* block 0 + 16 per-gain blocks */
+        int bo = blk * 0xab4;
+        int16_t *kernel_a = (int16_t *)(buf + bo + 0x678);
+        int16_t *kernel_b = (int16_t *)(buf + bo + 0x878);
+        const int16_t *base_a = (const int16_t *)(g_sharp_baseline + bo + 0x678);
+        const int16_t *base_b = (const int16_t *)(g_sharp_baseline + bo + 0x878);
+        for (int i = 0; i < 256; i++) {
+            kernel_a[i] = sharp_kernel_scale(base_a[i], ivar7);
+            kernel_b[i] = sharp_kernel_scale(base_b[i], ivar7);
+        }
+        for (size_t i = 0; i < sizeof iVar8_offs / sizeof iVar8_offs[0]; i++) {
+            int off = bo + iVar8_offs[i];
+            *(uint16_t *)(buf + off) = sharp_field_scale(*(uint16_t *)(g_sharp_baseline + off), ivar8, 4, 15);
+        }
+        for (size_t i = 0; i < sizeof iVar9_offs / sizeof iVar9_offs[0]; i++) {
+            int off = bo + iVar9_offs[i];
+            *(uint16_t *)(buf + off) = sharp_field_scale(*(uint16_t *)(g_sharp_baseline + off), ivar9, 8, 255);
+        }
+        for (size_t i = 0; i < sizeof iVar10_offs / sizeof iVar10_offs[0]; i++) {
+            int off = bo + iVar10_offs[i];
+            *(uint16_t *)(buf + off) = sharp_field_scale(*(uint16_t *)(g_sharp_baseline + off), ivar10, 8, 255);
+        }
     }
 
     int ret = isp_tunnel(ISP_INNER_SHARP, buf);
     free(buf);
     return ret;
 }
+
+/* Noise reduction strength (image.nr, -50..50, 0 = calibrated). Stock has no
+ * such control; the layouts come from stock's own validators
+ * (ak_vpss_set_nr2_attr @ 0x13a40c, ak_vpss_set_uvnr_attr @ 0x13aa28) and
+ * the values read back from the ISP (2026-11-12):
+ *   NR2 (luma, GET 0x8004492c / SET 0x4004492b): u32 mode, then 17 blocks
+ *     of 58 bytes (manual + 16 per-gain): enable, pass2, k, keep_th,
+ *     intensity1, intensity2, sigma (+12), 17 u16 weights (+14).
+ *   UVNR (chroma, GET 0x8004497e / SET 0x4004497d): u32 mode, then 17
+ *     blocks of 42 bytes: enable, pass2, k, sigma (+6), 17 weights (+8).
+ * Every weight table is a Gaussian of the pixel difference,
+ * w[i] = 1023 * exp(-256 i^2 / sigma) (checked on all 34 tables), with a
+ * per-table floor in the tail (1, 20, 50 or 100) and sometimes 0 in the last
+ * entry. Strength scales sigma by 2^(3*value/50) (1/8x .. 8x) and rebuilds the
+ * Gaussian part; floors and zero ends stay as calibrated. */
+#define NR2_SIZE   (4 + 17 * 58)
+#define UVNR_SIZE  (4 + 17 * 42)
+#define ISP_GET_NR2  0x8004492c
+#define ISP_SET_NR2  0x4004492b
+#define ISP_GET_UVNR 0x8004497e
+#define ISP_SET_UVNR 0x4004497d
+static uint8_t *g_nr2_base, *g_uvnr_base;          /* calibrated copies */
+static int g_nr_value;
+
+static void nr_rescale(uint8_t *out, const uint8_t *base, int blk_size, int sigma_off, int wt_off, double f)
+{
+    for (int b = 0; b < 17; b++) {
+        const uint8_t *bb = base + 4 + b * blk_size;
+        uint8_t *ob = out + 4 + b * blk_size;
+        uint16_t sigma;
+        memcpy(&sigma, bb + sigma_off, 2);
+        if (sigma == 0) continue;
+        double ns = sigma * f;
+        if (ns > 65535) ns = 65535;
+        if (ns < 1) ns = 1;
+        uint16_t nsv = (uint16_t)(ns + 0.5);
+        memcpy(ob + sigma_off, &nsv, 2);
+        /* the table's floor: its last non-zero entry when that is above the
+         * Gaussian (a plateau of 20/50/100), else 1 */
+        int floor_v = 1;
+        for (int i = 16; i >= 1; i--) {
+            uint16_t w;
+            memcpy(&w, bb + wt_off + 2 * i, 2);
+            if (!w) continue;
+            if (w > 1023.0 * exp(-256.0 * i * i / sigma) + 1.5) floor_v = w;
+            break;
+        }
+        for (int i = 1; i < 17; i++) {
+            uint16_t w;
+            memcpy(&w, bb + wt_off + 2 * i, 2);
+            if (w == 0) continue;                                   /* calibrated zero end */
+            double g_new = 1023.0 * exp(-256.0 * i * i / ns);
+            int nv = (int)(g_new + 0.5);
+            if (nv < floor_v) nv = floor_v;
+            if (nv > 1023) nv = 1023;
+            uint16_t o = (uint16_t)nv;
+            memcpy(ob + wt_off + 2 * i, &o, 2);
+        }
+    }
+}
+
+int isp_set_nr(int value /* -50..50 */)
+{
+    if (value < -50 || value > 50) return -1;
+    if (!g_nr2_base) {
+        uint8_t *a = calloc(1, 0x1000), *b = calloc(1, 0x1000);    /* larger than the kernel copy */
+        if (!a || !b || isp_tunnel(ISP_GET_NR2, a) != 0 || isp_tunnel(ISP_GET_UVNR, b) != 0) {
+            free(a); free(b); return -1;
+        }
+        g_nr2_base = a; g_uvnr_base = b;
+    }
+    double f = pow(2.0, 3.0 * value / 50.0);
+    uint8_t *n2 = malloc(0x1000), *uv = malloc(0x1000);
+    if (!n2 || !uv) { free(n2); free(uv); return -1; }
+    memcpy(n2, g_nr2_base, 0x1000);
+    memcpy(uv, g_uvnr_base, 0x1000);
+    if (value) {
+        nr_rescale(n2, g_nr2_base, 58, 12, 14, f);
+        nr_rescale(uv, g_uvnr_base, 42, 6, 8, f);
+    }
+    int rc = isp_tunnel(ISP_SET_NR2, n2);
+    if (rc == 0) rc = isp_tunnel(ISP_SET_UVNR, uv);
+    free(n2); free(uv);
+    if (rc == 0) g_nr_value = value;
+    return rc;
+}
+
+int isp_get_nr(void) { return g_nr_value; }
 
 /* Forget all cached picture-control baselines (saturation/contrast/
  * brightness/sharpness). Call this after any full ISP pipeline reload
@@ -708,4 +801,70 @@ void isp_reset_picture_baselines(void)
     g_sharp_baseline_valid      = 0;
     free(g_sharp_baseline);
     g_sharp_baseline = NULL;
+    free(g_nr2_base); free(g_uvnr_base);
+    g_nr2_base = g_uvnr_base = NULL;
+}
+
+/* Image orientation. Reversed from stock anyka_ipc:
+ *   ak_vpss_switch_flip_mirror(dev, flip_en, mirror_en) @ 0x0012f88c
+ *     -> isp_set_flip_mirror(dev, u32[2]{flip, mirror}) @ 0x0012e950
+ *     -> Ak_ISP_Set_Flip_Mirror -> isp_sdk_ioctl(dev, 0x40044979, payload)
+ * isp_sdk_ioctl builds the same 204-byte {flag=1, inner_cmd, payload}
+ * wrapper as isp_tunnel(). Stock XORs the request with a per-sensor
+ * default orientation; that default is 0/0 on this board, so values are
+ * sent as-is. Verified on hardware 2026-11-11: 0/0 matches the native boot
+ * image, 1/1 = 180 degrees, 0/1 = horizontal mirror, 1/0 = vertical flip,
+ * colours unchanged in all four. */
+/* Debug (GET /api/isp/ae): AE run info and the first 64 words of the
+ * exposure attribute struct, read-only. */
+int isp_ae_debug_json(char *out, size_t cap)
+{
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    static uint8_t expo[EXPO_BUF_SIZE];
+    uint8_t run[36];
+    pthread_mutex_lock(&lk);
+    memset(run, 0, sizeof run);
+    memset(expo, 0, sizeof expo);
+    int a = isp_tunnel(ISP_INNER_GET_AE_RUN_INFO, run);
+    int b = isp_tunnel(ISP_INNER_GET_EXPOSURE, expo);
+    size_t o = (size_t)snprintf(out, cap, "{\"run_ok\":%s,\"expo_ok\":%s,\"run\":[", a ? "false" : "true", b ? "false" : "true");
+    for (int i = 0; i < 9 && o < cap; i++)
+        o += (size_t)snprintf(out + o, cap - o, "%s%u", i ? "," : "", (unsigned)((uint32_t *)run)[i]);
+    if (o < cap) o += (size_t)snprintf(out + o, cap - o, "],\"expo\":[");
+    for (int i = 0; i < 128 && o < cap; i++)
+        o += (size_t)snprintf(out + o, cap - o, "%s%d", i ? "," : "", (int)((int32_t *)expo)[i]);
+    if (o < cap) o += (size_t)snprintf(out + o, cap - o, "]}");
+    pthread_mutex_unlock(&lk);
+    return o < cap ? (int)o : (int)cap - 1;
+}
+
+/* Debug (GET /api/isp/get?m=...): hex of a read-only ISP attribute. Only GET
+ * commands from this list; the kernel copy lands in a buffer larger than
+ * the biggest attribute (sharp, 0xb5f8). */
+int isp_debug_get_hex(const char *m, size_t len, char *out, size_t cap)
+{
+    static const struct { const char *name; uint32_t cmd; } k[] = {
+        { "nr1", 0x8004490b }, { "nr2", 0x8004492c }, { "uvnr", 0x8004497e },
+        { "3dnr", 0x80044930 }, { "expo", ISP_INNER_GET_EXPOSURE },
+    };
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    uint32_t cmd = 0;
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!strcmp(m, k[i].name)) cmd = k[i].cmd;
+    if (!cmd || cap < 3) return -1;
+    if (len > 0x2000) len = 0x2000;
+    if (len * 2 + 1 > cap) len = (cap - 1) / 2;
+    uint8_t *buf = calloc(1, 0xc000);
+    if (!buf) return -1;
+    pthread_mutex_lock(&lk);
+    int rc = isp_tunnel(cmd, buf);
+    pthread_mutex_unlock(&lk);
+    if (rc == 0) for (size_t i = 0; i < len; i++) snprintf(out + 2 * i, 3, "%02x", buf[i]);
+    free(buf);
+    return rc == 0 ? (int)(len * 2) : -1;
+}
+
+int isp_set_flip_mirror(int flip, int mirror)
+{
+    uint32_t fm[2] = { flip ? 1u : 0u, mirror ? 1u : 0u };
+    return isp_tunnel(ISP_INNER_SET_FLIP_MIRROR, fm);
 }

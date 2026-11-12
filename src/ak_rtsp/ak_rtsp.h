@@ -35,6 +35,7 @@
 #define VI_BUF_COUNT    1        /* Only 1 buffer needed — kernel encode mode */
 
 #define RTSP_SERVER_PORT 554
+#define RTSPS_SERVER_PORT 322   /* RTSP over TLS (rtsps://), certificate from tls.c */
 
 /* -------------------------------------------------------------------------
  * Global device file descriptors (defined in main.c)

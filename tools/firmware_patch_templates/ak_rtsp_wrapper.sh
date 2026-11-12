@@ -22,7 +22,7 @@ WPA_CONF=/etc/config/wpa_supplicant.conf
 if [ -f "$WPA_CONF" ] && ! ps | grep -v grep | grep -q wpa_supplicant; then
     echo "ak_rtsp_wrapper: starting wpa_supplicant + udhcpc"
     wpa_supplicant -Dnl80211 -i wlan0 -c "$WPA_CONF" -B
-    udhcpc -i wlan0 -x hostname:IPCamera &
+    udhcpc -i wlan0 -x hostname:camera-1 &
     touch /tmp/connect_type_wifi
 fi
 

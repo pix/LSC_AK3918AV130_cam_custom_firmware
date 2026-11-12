@@ -1,12 +1,13 @@
 CC      = zig cc -target arm-linux-musleabi -mcpu=arm926ej_s
-CFLAGS  = -std=gnu99 -mfloat-abi=soft -O2 -Wall -g \
+CFLAGS  = -std=gnu99 -mfloat-abi=soft -O2 -Wall -g -ffp-contract=off \
           -I. \
           -I../smolrtsp/include \
           -I../smolrtsp/build/_deps/slice99-src \
           -I../smolrtsp/build/_deps/datatype99-src \
           -I../smolrtsp/build/_deps/interface99-src \
           -I../smolrtsp/build/_deps/metalang99-src/include \
-          -DSMOLRTSP_WITH_H264
+          -DSMOLRTSP_WITH_H264 \
+          -Ithird_party/mbedtls/include -DMBEDTLS_CONFIG_FILE='"tls_config.h"'
 LDFLAGS = -pthread -static
 
 TARGET     = ak_rtsp
@@ -15,6 +16,28 @@ TARGET_HOOK = isp_hook.so
 TARGET_TOOL = flash_tool
 TARGET_DIV0 = patch_div0
 .DEFAULT_GOAL := all
+
+# Custom speaker sound ("Custom sound" button, webhook "custom"): your own
+# sounds/custom.wav, else this default is downloaded once and checksum-checked
+# (the Windows 3.1 "Tada", via winhistory.de). Opt out: make CUSTOM_SOUND_URL=
+# Other sound: make CUSTOM_SOUND_URL=https://... CUSTOM_SOUND_SHA256=<sha256 or empty>
+CUSTOM_SOUND_URL    ?= https://www.winhistory.de/more/winstart/down/owin31.wav
+CUSTOM_SOUND_SHA256 ?= e78187f27ea746aee7ceda0d8daf701d8d3dc469b24c7b25b71fa32bf773b136
+.PHONY: fetch-sound
+fetch-sound:
+	@./third_party/fetch_sound.sh "$(CUSTOM_SOUND_URL)" "$(CUSTOM_SOUND_SHA256)"
+
+sounds_custom.c: gen_sound.py $(wildcard sounds/custom.wav) | fetch-sound
+	python3 -I gen_sound.py sounds/custom.wav sounds_custom.c
+
+web_page.c: web/index.html gen_web_page.py
+	python3 -I gen_web_page.py web/index.html web_page.c
+
+web_rec_page.c: web/recordings.html gen_web_page.py
+	python3 -I gen_web_page.py web/recordings.html web_rec_page.c web_recordings_html
+
+web_term_page.c: web/terminal.html gen_web_page.py
+	python3 -I gen_web_page.py web/terminal.html web_term_page.c web_terminal_html
 
 # -----------------------------------------------------------------------
 # Build versioning
@@ -45,6 +68,53 @@ SRCS    = main.c \
           night.c \
           control.c \
           version.c \
+          md5.c \
+          auth.c \
+          jpeg_enc.c \
+          web.c \
+          web_page.c \
+          web_rec_page.c \
+          web_term_page.c \
+          resetkey.c \
+          monotime.c \
+          system.c \
+          netcfg.c \
+          qrwifi.c \
+          sha1.c \
+          live.c \
+          speaker.c \
+          osd.c \
+          osd_hw.c \
+          osd_font.c \
+          tls.c \
+          snapshot.c \
+          mqtt.c \
+          events.c \
+          sounddet.c \
+          tamper.c \
+          sdn.c \
+          sched.c \
+          substream.c \
+          backup.c \
+          term.c \
+          npu.c \
+          md.c \
+          fmp4.c \
+          record.c \
+          onvif.c \
+          imgx.c \
+          aec.c \
+          third_party/speexdsp/mdf.c \
+          third_party/speexdsp/preprocess.c \
+          third_party/speexdsp/fftwrap.c \
+          third_party/speexdsp/filterbank.c \
+          third_party/speexdsp/kiss_fft.c \
+          third_party/speexdsp/kiss_fftr.c \
+          sounds_custom.c \
+          third_party/quirc/quirc.c \
+          third_party/quirc/decode.c \
+          third_party/quirc/identify.c \
+          third_party/quirc/version_db.c \
           $(wildcard ../smolrtsp/src/*.c) \
           $(wildcard ../smolrtsp/src/types/*.c) \
           $(wildcard ../smolrtsp/src/writer/*.c) \
@@ -101,7 +171,27 @@ $(TARGET_TOOL): flash_tool.c arm_atomics.S
 $(TARGET_DIV0): patch_div0.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-$(TARGET): $(OBJS)
+# mbedTLS (HTTPS): fetched + checksum-verified by third_party/fetch_mbedtls.sh,
+# compiled with tls_config.h into a static library (unused parts drop out).
+MBEDTLS_DIR  = third_party/mbedtls
+MBEDTLS_LIB  = third_party/libmbedtls_ak.a
+$(MBEDTLS_DIR)/library/ssl_tls.c:
+	./third_party/fetch_mbedtls.sh
+$(MBEDTLS_LIB): $(MBEDTLS_DIR)/library/ssl_tls.c tls_config.h
+	rm -rf third_party/mbedtls_obj && mkdir -p third_party/mbedtls_obj
+	for f in $(MBEDTLS_DIR)/library/*.c; do \
+	  $(CC) -std=gnu99 -mfloat-abi=soft -O2 -I. -I$(MBEDTLS_DIR)/include \
+	        -DMBEDTLS_CONFIG_FILE='"tls_config.h"' -c $$f \
+	        -o third_party/mbedtls_obj/$$(basename $$f .c).o || exit 1; done
+	rm -f $@ && $(AR) rcs $@ third_party/mbedtls_obj/*.o
+# SpeexDSP (echo canceller): fixed point, its own config.h
+SPEEX_OBJS = aec.o $(patsubst %.c,%.o,$(wildcard third_party/speexdsp/*.c))
+$(SPEEX_OBJS): CFLAGS += -DHAVE_CONFIG_H -Ithird_party/speexdsp
+
+tls.o: $(MBEDTLS_LIB)
+tls.o: CFLAGS += -DTLS_BUILD_EPOCH=$(shell date +%s)L
+
+$(TARGET): $(OBJS) $(MBEDTLS_LIB)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 %.o: %.S
@@ -113,7 +203,7 @@ $(TARGET): $(OBJS)
 # version.o — always rebuilt (FORCE). Calls gen_version.ps1 first to
 # increment the counter and regenerate version_info.h, then compiles.
 version.o: version.c FORCE
-	pwsh -NoProfile -NonInteractive -File gen_version.ps1
+	./gen_version.sh
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:

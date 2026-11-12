@@ -15,6 +15,89 @@ This project completely removes the proprietary Tuya cloud agent (`anyka_ipc`) a
 
 ---
 
+## This fork: ak_rtsp with login, web admin, Home Assistant and recording
+
+> [!WARNING]
+> **AI-assisted work, tested on one camera only.** The code, reverse engineering and documentation in
+> this fork were written with AI assistants (Anthropic Claude and DeepSeek) under human direction.
+> It was tested on a single unit: LSC Smart Connect indoor camera **model `3215672.3`, `SI D26228`**.
+> Other models or hardware revisions may differ. Read the code before trusting it, keep your stock
+> firmware backup (step 0 below), and use it at your own risk.
+
+This fork turns `ak_rtsp` into a complete camera firmware for local use. It runs on the
+same decloud setup as the original project (only `bin/ak_rtsp` in the APP partition changes).
+
+![Web admin page: live view with overlay and image settings](docs/screenshots/overview.jpg)
+
+- **Login everywhere:** HTTP and RTSP Digest, per-IP login backoff, reset button (10 s) or SD file to restore `admin/admin`.
+- **Web admin page** (port 80, HTTPS 443): live view with audio and push-to-talk, snapshot, image settings,
+  day/night and IR, overlay, motion zones, recordings browser, Wi-Fi (with rollback), time/NTP,
+  health, settings backup/restore, optional development terminal.
+- **HTTPS and RTSPS** (port 322) with an on-camera CA or your own certificate; reverse proxy support
+  (Traefik, see `docs/ak_rtsp-auth/traefik.md`).
+- **Streams:** 1080p main stream and a 640x360 sub stream (`/sub`), up to 4 RTSP/RTSPS sessions.
+- **Burned-in overlay:** date/time, day/night tag, frame rate and custom text drawn by the ISP.
+- **Less storage:** adaptive frame rate (idle at 10/5/3 fps, full rate on motion in the zones or anywhere,
+  about 70% less at 5 fps), smart encoding (long GOP / long-term reference), H.264 High profile.
+- **Picture:** brightness, contrast, saturation and sharpness behave like the stock app (re-derived from its
+  disassembly), plus WDR, noise reduction strength, anti-flicker, flip/mirror and privacy masks.
+- **Day/night:** stock soft photosensor algorithm or exposure-based, IR LED auto/on/off, light level.
+- **Events:** motion (software or ISP statistics, zones), sound level, tamper (covered/moved),
+  delivered to MQTT (Home Assistant discovery, TLS with pinning or client certificates), a webhook and ONVIF.
+- **ONVIF** (Profile S subset): discovery, media profiles, snapshot, imaging, events (PullPoint),
+  audio back-channel; checked against what Home Assistant's ONVIF integration does.
+- **SD card recording:** continuous or event-based fragmented MP4, pre/post-event buffer, timelapse, weekly
+  schedules, privacy hours, retention by free space and age.
+- **Speaker:** chimes, custom sound, webhook-triggered sounds, talk-back from the browser.
+- **Microphone:** echo cancellation (SpeexDSP) with voice ducking so phone talk-back does not howl, mute while
+  playing, gain, AGC, noise gate.
+- **Status LED** activity feedback, microphone gain.
+
+### Screenshots
+The camera picture is replaced by cat photos.
+
+| | |
+|---|---|
+| ![Overlay settings](docs/screenshots/overlay.jpg) | ![Motion detection and zones](docs/screenshots/events.jpg) |
+| Video overlay: text, date/time, day/night tag, position | Motion detection: detector choice, sensitivity, zone grid |
+| ![MQTT and Home Assistant](docs/screenshots/integrations.jpg) | ![Recordings browser](docs/screenshots/recordings.jpg) |
+| MQTT with Home Assistant discovery | Recordings: motion/sound clips, pictures, timelapse, continuous |
+| ![Wi-Fi](docs/screenshots/network.jpg) | ![HTTPS](docs/screenshots/security.jpg) |
+| Wi-Fi scan and connect with automatic rollback | Login and HTTPS with the camera's own CA |
+| ![Health](docs/screenshots/system.jpg) | ![Dark theme](docs/screenshots/dark.jpg) |
+| System health and time | Follows the system dark theme |
+
+<p align="center"><img src="docs/screenshots/mobile.jpg" alt="Phone layout" width="300"></p>
+
+#### Recording to the SD card
+
+| | |
+|---|---|
+| ![Recording settings](docs/screenshots/rec_settings.jpg) | ![Recording schedule](docs/screenshots/rec_schedule.jpg) |
+| Record on motion, sound, both or continuously; pre/post-event time, sound, event pictures, timelapse, retention by space and age | Weekly hour grid for recording, alerts and privacy, with presets |
+| ![Browse by day](docs/screenshots/rec_browse.jpg) | ![Select and download](docs/screenshots/rec_select.jpg) |
+| Browse by day from the settings page | Recordings page: filter by type and date, select, download as .tar or delete |
+
+![Player](docs/screenshots/rec_player.jpg)
+The player: clips and pictures with previous/next and download.
+
+Screenshots: `tools/dev/readme_shots.js` (Playwright) takes them from a running camera with the picture,
+Wi-Fi scan and recording list replaced and personal values (addresses, MAC, Wi-Fi name, overlay text,
+certificate fingerprints) rewritten, and refuses to save a shot where an original value is still visible.
+
+How it was tested, how to try a build without flashing, guarded flashing/rollback, and the hardware
+quirks found on the way: [TESTING.md](TESTING.md). Reverse-engineering notes: `docs/ak_rtsp-auth/re/`.
+
+**Building this fork:** as below (Zig + SmolRTSP checkout), then
+`cd src/ak_rtsp && make AR="zig ar"`. The first build downloads and checksum-verifies mbedTLS 3.6.7
+(`third_party/fetch_mbedtls.sh`, needs `curl`, `bzip2`, `sha256sum`) and the default custom
+speaker sound, the Windows 3.1 "Tada" (`third_party/fetch_sound.sh`, checksum-checked; `python3` and
+`ffmpeg` convert it). Use your own with `src/ak_rtsp/sounds/custom.wav`, another download with
+`make CUSTOM_SOUND_URL=… CUSTOM_SOUND_SHA256=…`, or none with `make CUSTOM_SOUND_URL=`.
+`python3` also regenerates the web pages if you edit them. Host tests: `bash tests/run_host_tests.sh`.
+
+---
+
 ## ⚠️ Important Disclaimer & Risks
 
 > ⚠️ **CAUTION: FLASHING AND MODIFYING THIS DEVICE IS STRICTLY AT YOUR OWN RISK.**
@@ -163,8 +246,11 @@ The custom `ak_rtsp` server is **path-agnostic** (it serves the 1080p video + au
 │   ├── flash_partition_map_and_rootfs.md# Flash layout, stock boot traps, de-Tuyafication
 │   ├── firmware_building_and_flashing.md# Build guide & SPI-NOR DMA contention gotchas
 │   ├── camera_and_audio_pipeline.md     # ISP registers, div0 kernel fix, audio capture
-│   └── building_your_own_firmware.md    # WSL setup, dump/unsquash/patch/rebuild your own image
+│   ├── building_your_own_firmware.md    # WSL setup, dump/unsquash/patch/rebuild your own image
+│   └── ak_rtsp-auth/                    # This fork: reverse-engineering notes, Traefik guide
 ├── images/                              # Hardware photographs and diagrams
+├── tests/                               # This fork: host tests (run_host_tests.sh) and camera test scripts
+├── TESTING.md                           # This fork: test procedure, safe flashing, hardware findings
 ├── src/
 │   └── ak_rtsp/                         # Standalone C RTSP server & flash_tool source
 │       ├── Makefile                     # Cross-compilation Makefile (Zig / Anyka GCC)
@@ -187,6 +273,8 @@ The custom `ak_rtsp` server is **path-agnostic** (it serves the 1080p video + au
     │   ├── restore.sh                   # Restore stock APP partition
     │   ├── restore_full_firmware.sh     # Restore ALL stock partitions
     │   └── ...
+    ├── maint/                           # This fork: guarded APP flash/rollback (flash_image.sh, KNOWN_IMAGES)
+    ├── dev/                             # This fork: camera shell, SD test-binary deploy, SD hook lines, README screenshots
     ├── firmware_patch_templates/        # The actual de-Tuyafication patch (process.ini + wrapper)
     └── hardware_debug/                  # Hardware tools
         ├── lolin32_uart_bridge/         # ESP32 auto U-Boot interception firmware
@@ -314,4 +402,11 @@ many sessions before this repo was compiled:
 ## Credits & Acknowledgements
 
 - **Anyka Community & Researchers:** Inspiration and reference implementations from [VGerris's Anyka Hacking Journey](https://github.com/VGerris/Anyka_ak3918_hacking_journey) and [Lawliet95's ANYKA Tuya Journey](https://github.com/Lawliet95/ANYKA-Tuya-Hacking-Journey-AK3918v200EN080-v200). Both cover earlier-generation Anyka SoCs (`AK3918EV200`/`GK7102`) with different register maps and flash layouts than this Revision 2 (`AK3918AV130`) hardware, but were valuable for general ioctl naming conventions and orientation.
+- **Original firmware:** [FluxAlchemist/LSC_AK3918AV130_cam_custom_firmware](https://github.com/FluxAlchemist/LSC_AK3918AV130_cam_custom_firmware), which this fork builds on.
+- **Decloud wizard:** [4ddict/Action-Smart-Connect-Flasher](https://github.com/4ddict/Action-Smart-Connect-Flasher), used to decloud and install on the development unit.
+- **mbedTLS** (Apache-2.0, fetched at build time) for HTTPS/RTSPS/MQTT TLS; **quirc** (ISC) for Wi-Fi QR codes.
+- **Screenshot cats** (CC0, via Wikimedia Commons, cropped to 16:9): [Gaspard the too big cat](https://commons.wikimedia.org/wiki/File:Gaspard_the_too_big_cat_(Unsplash)_(2017;_cropped_2023).jpg)
+  by Elsa Noblet and [Hairless cat and a plant](https://commons.wikimedia.org/wiki/File:Hairless_cat_and_a_plant_(Unsplash)_(2016;_cropped_2023).jpg) by Linnea Sandbakk (Unsplash).
+- **Default custom sound:** the Windows 3.1 startup sound (© Microsoft), downloaded at build time from
+  [winhistory.de](https://www.winhistory.de/more/winstart/winstart_en.htm); it is not part of this repository.
 - **SmolRTSP (OpenIPC):** High-performance, lightweight RTSP library for embedded systems by [OpenIPC/smolrtsp](https://github.com/OpenIPC/smolrtsp).

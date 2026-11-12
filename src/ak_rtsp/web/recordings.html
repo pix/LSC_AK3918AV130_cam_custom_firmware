@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Recordings</title>
+<style>
+:root{
+  --bg:#f5f6f8;--surface:#fff;--surface-2:#f9fafb;--line:#e4e7ec;--line-2:#d0d5dd;
+  --fg:#101828;--fg-2:#344054;--muted:#667085;
+  --accent:#2563eb;--accent-hover:#1d4ed8;--accent-soft:#eff4ff;--accent-fg:#fff;
+  --ok:#067647;--warn:#b54708;--warn-soft:#fffaeb;--danger:#d92d20;--danger-soft:#fef3f2;
+  --motion:#7a5af8;--sound:#dd2590;--both:#e04f16;--cont:#0e9384;--pic:#475467;
+  --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.04);
+  --r:12px;--r-sm:8px;--mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0b0f14;--surface:#12171e;--surface-2:#171d26;--line:#232b36;--line-2:#2f3946;
+  --fg:#e7ecf2;--fg-2:#c4ccd6;--muted:#8a96a6;
+  --accent:#4f8cff;--accent-hover:#6a9dff;--accent-soft:#16233b;--accent-fg:#fff;
+  --ok:#47cd89;--warn:#fdb022;--warn-soft:#2e2208;--danger:#f97066;--danger-soft:#33100d;
+  --motion:#9b8afb;--sound:#f670c7;--both:#ff9c66;--cont:#2ed3b7;--pic:#98a2b3;
+  --shadow:0 1px 2px rgba(0,0,0,.4);
+}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--surface) 92%,transparent);backdrop-filter:saturate(1.4) blur(8px);border-bottom:1px solid var(--line)}
+.wrap{max-width:1320px;margin:0 auto;padding:0 20px}
+.top-in{display:flex;align-items:center;gap:14px;padding:10px 0;flex-wrap:wrap}
+.logo{width:32px;height:32px;border-radius:9px;background:var(--accent);color:#fff;display:grid;place-items:center;flex:none}
+.logo svg.i{width:18px;height:18px}
+.title{font-weight:600;font-size:15px}.sub{color:var(--muted);font-size:12px}
+.grow{flex:1}
+button,.btn{font:inherit;font-size:13.5px;font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:34px;padding:0 13px;border-radius:var(--r-sm);border:1px solid var(--line-2);background:var(--surface);color:var(--fg-2);cursor:pointer;white-space:nowrap}
+button:hover,.btn:hover{background:var(--surface-2);text-decoration:none}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}button.primary:hover{background:var(--accent-hover)}
+button.danger{color:var(--danger)}button.danger:hover{background:var(--danger-soft)}
+button.ghost{border-color:transparent;background:transparent}button.ghost:hover{background:var(--surface-2)}
+button.icon,.btn.icon{width:32px;height:32px;padding:0}
+button:disabled{opacity:.5;cursor:default}
+button:focus-visible,.btn:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 0}
+.seg{display:inline-flex;padding:3px;gap:2px;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;flex-wrap:wrap}
+.seg button{height:28px;padding:0 10px;border:0;border-radius:6px;background:transparent;color:var(--muted);font-size:13px}
+.seg button:hover{color:var(--fg)}
+.seg button.on{background:var(--surface);color:var(--fg);box-shadow:0 1px 2px rgba(16,24,40,.12),0 0 0 1px var(--line)}
+input[type=date],select{height:34px;font:inherit;font-size:13px;padding:0 9px;border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--surface);color:var(--fg)}
+.lbl{color:var(--muted);font-size:12.5px}
+.summary{color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
+.selbar{position:sticky;top:57px;z-index:15;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;margin-bottom:12px;border-radius:var(--r-sm);
+  background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);color:var(--fg-2)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:clip;margin-bottom:24px}
+.day{position:sticky;top:57px;z-index:5;display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--surface-2);border-bottom:1px solid var(--line);font-weight:600}
+.day .meta{color:var(--muted);font-weight:400;font-size:13px}
+.row{display:grid;grid-template-columns:28px 72px 74px 1fr auto auto;align-items:center;gap:12px;padding:8px 14px;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.row:hover{background:var(--surface-2)}
+.row.sel{background:var(--accent-soft)}
+.thumb{width:72px;height:41px;border-radius:6px;background:#000 center/cover no-repeat;display:grid;place-items:center;color:#fff;cursor:pointer;overflow:hidden}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb svg.i{opacity:.75}
+.time{font-variant-numeric:tabular-nums;font-weight:600}
+.kind{display:flex;align-items:center;gap:8px;min-width:0}
+.badge{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;font-size:12px;font-weight:600;color:#fff;white-space:nowrap}
+.k-motion{background:var(--motion)}.k-sound{background:var(--sound)}.k-event{background:var(--both)}.k-cont{background:var(--cont)}.k-timelapse{background:#7c5cbf}.k-pic{background:var(--pic)}
+.size{color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums;text-align:right;min-width:70px}
+.acts{display:flex;gap:4px}
+.live{color:var(--danger);font-size:12px;font-weight:600}
+input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;margin:0}
+.empty{padding:48px 20px;text-align:center;color:var(--muted)}
+.more{display:flex;justify-content:center;padding:12px}
+@media (max-width:640px){.row{grid-template-columns:24px 64px 1fr auto;}.row .size{display:none}.row .kind{grid-column:3}.thumb{width:64px;height:36px}.time{grid-column:3;grid-row:1}}
+/* viewer */
+.viewer{position:fixed;inset:0;z-index:50;background:rgba(5,8,12,.92);display:flex;flex-direction:column}
+.vtop{display:flex;align-items:center;gap:10px;padding:12px 16px;color:#e7ecf2}
+.vtop .name{font-weight:600}.vtop .meta{color:#98a2b3;font-size:13px}
+.vtop button,.vtop .btn{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.15);color:#e7ecf2}
+.vtop button:hover,.vtop .btn:hover{background:rgba(255,255,255,.16)}
+.vmain{flex:1;display:flex;align-items:center;justify-content:center;gap:10px;padding:0 10px 16px;min-height:0}
+.vmedia{flex:1;height:100%;display:flex;align-items:center;justify-content:center;min-width:0}
+.vmedia video,.vmedia img{max-width:100%;max-height:100%;border-radius:8px;background:#000}
+.nav{width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.1);border:0;color:#fff}
+.nav:hover{background:rgba(255,255,255,.2)}
+#toast{position:fixed;left:50%;bottom:20px;transform:translate(-50%,8px);background:var(--fg);color:var(--bg);padding:9px 14px;border-radius:var(--r-sm);font-size:13.5px;opacity:0;transition:opacity .18s,transform .18s;pointer-events:none;z-index:60}
+#toast.show{opacity:1;transform:translate(-50%,0)}#toast.err{background:var(--danger);color:#fff}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <div class="top-in">
+    <a class="btn ghost icon" href="/#recordings" title="Back to the camera"><i data-i="back"></i></a>
+    <span class="logo"><i data-i="film"></i></span>
+    <div><div class="title">Recordings</div><div class="sub" id="cam">…</div></div>
+    <span class="grow"></span>
+    <span class="summary" id="sd"></span>
+    <button id="reload" class="ghost"><i data-i="refresh"></i><span>Refresh</span></button>
+  </div>
+</div></header>
+
+<main class="wrap">
+  <div class="bar">
+    <div class="seg" id="kind">
+      <button data-v="all" class="on">All</button><button data-v="motion">Motion</button><button data-v="sound">Sound</button>
+      <button data-v="event">Motion + sound</button><button data-v="cont">Continuous</button><button data-v="timelapse">Timelapse</button><button data-v="pic">Pictures</button>
+    </div>
+    <span class="lbl">From</span><input type="date" id="from" aria-label="From date">
+    <span class="lbl">to</span><input type="date" id="to" aria-label="To date">
+    <select id="sort" aria-label="Sort"><option value="new">Newest first</option><option value="old">Oldest first</option></select>
+    <span class="grow"></span>
+    <span class="summary" id="summary"></span>
+  </div>
+
+  <div class="selbar" id="selbar" hidden>
+    <strong id="selcount"></strong>
+    <span class="grow"></span>
+    <button class="primary" id="dl"><i data-i="download"></i>Download (.tar)</button>
+    <button class="danger" id="del"><i data-i="trash"></i>Delete</button>
+    <button class="ghost" id="clear">Clear selection</button>
+  </div>
+
+  <div id="list"><div class="card"><div class="empty">Loading…</div></div></div>
+  <div class="more" id="morebox" hidden><button id="more">Show more</button></div>
+</main>
+
+<div class="viewer" id="viewer" hidden>
+  <div class="vtop">
+    <div><div class="name" id="vname"></div><div class="meta" id="vmeta"></div></div>
+    <span class="grow"></span>
+    <a class="btn" id="vdl"><i data-i="download"></i>Download</a>
+    <button id="vclose" title="Close (Esc)"><i data-i="x"></i></button>
+  </div>
+  <div class="vmain">
+    <button class="nav" id="vprev" title="Previous (←)"><i data-i="left"></i></button>
+    <div class="vmedia" id="vmedia"></div>
+    <button class="nav" id="vnext" title="Next (→)"><i data-i="right"></i></button>
+  </div>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
+const ICONS={film:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/>',
+ back:'<path d="m15 18-6-6 6-6"/>',left:'<path d="m15 18-6-6 6-6"/>',right:'<path d="m9 18 6-6-6-6"/>',x:'<path d="M18 6 6 18M6 6l12 12"/>',
+ refresh:'<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>',download:'<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
+ trash:'<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>',play:'<path d="M7 4v16l13-8z"/>',image:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>'};
+const svg=n=>`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]||""}</svg>`;
+for(const el of $$("i[data-i]"))el.outerHTML=svg(el.dataset.i);
+const esc=t=>String(t).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let tt;function toast(m,err){const t=$("#toast");t.textContent=m;t.className="show"+(err?" err":"");clearTimeout(tt);tt=setTimeout(()=>t.className="",err?4000:2500)}
+const size=b=>b>=1073741824?(b/1073741824).toFixed(2)+" GB":b>=1048576?(b/1048576).toFixed(1)+" MB":Math.max(1,Math.round(b/1024))+" KB";
+const KIND={motion:"Motion",sound:"Sound",event:"Motion + sound",cont:"Continuous",timelapse:"Timelapse",pic:"Picture"};
+function kindOf(n){if(n.endsWith(".jpg"))return"pic";const m=/_(motion|sound|event|cont|timelapse)\.mp4$/.exec(n);return m?m[1]:"cont"}
+function secs(n){const m=/^(\d\d)-(\d\d)-(\d\d)/.exec(n);return m?+m[1]*3600+ +m[2]*60+ +m[3]:0}
+const url=f=>`/rec/${encodeURIComponent(f.d)}/${encodeURIComponent(f.n)}`;
+
+let all=[],view=[],shown=0,sel=new Set(),kind="all";
+const PAGE=300,key=f=>f.d+"/"+f.n;
+
+async function load(){
+  try{
+    const [list,st,rs]=await Promise.all([fetch("/api/rec/all").then(r=>r.json()),fetch("/api/status").then(r=>r.json()),fetch("/api/rec").then(r=>r.json())]);
+    all=list;
+    for(const f of all){f.k=kindOf(f.n);f.t=secs(f.n)}
+    /* thumbnail for a video: the event picture taken within 15 s of its start */
+    const pics={};for(const f of all)if(f.k==="pic")(pics[f.d]=pics[f.d]||[]).push(f);
+    for(const f of all)if(f.k!=="pic"){const c=(pics[f.d]||[]).find(p=>Math.abs(p.t-f.t)<=15);f.thumb=c?url(c):null}
+    $("#cam").textContent=st.name||"Camera";document.title="Recordings · "+(st.name||"Camera");
+    $("#sd").textContent=rs.sd?`SD card: ${size(rs.free_mb*1048576)} free of ${size(rs.total_mb*1048576)}`:"No SD card";
+    if(!$("#from").value&&all.length){$("#from").min=all[all.length-1].d;$("#to").max=all[0].d}
+    for(const k of [...sel])if(!all.some(f=>key(f)===k))sel.delete(k);
+    apply()
+  }catch(e){$("#list").innerHTML='<div class="card"><div class="empty">Cannot load the recordings.</div></div>'}
+}
+
+function apply(){
+  const from=$("#from").value,to=$("#to").value,old=$("#sort").value==="old";
+  view=all.filter(f=>(kind==="all"||f.k===kind)&&(!from||f.d>=from)&&(!to||f.d<=to));
+  if(old)view=view.slice().reverse();
+  const bytes=view.reduce((a,f)=>a+f.s,0);
+  $("#summary").textContent=`${view.length} file${view.length===1?"":"s"} · ${size(bytes)}`;
+  shown=0;$("#list").innerHTML="";renderMore();updateSel()
+}
+
+function rowHtml(f,i){
+  const k=f.k,isPic=k==="pic",th=isPic?url(f):f.thumb;
+  return `<div class="row${sel.has(key(f))?" sel":""}" data-i="${i}">
+    <input type="checkbox" ${sel.has(key(f))?"checked":""} aria-label="Select">
+    <div class="thumb" data-a="view">${th?`<img loading="lazy" src="${th}" alt="">`:svg("play")}</div>
+    <span class="time">${esc(f.n.slice(0,8).replace(/-/g,":"))}</span>
+    <span class="kind"><span class="badge k-${k}">${KIND[k]}</span>${f.r?'<span class="live">● recording</span>':""}</span>
+    <span class="size">${size(f.s)}</span>
+    <span class="acts"><button class="ghost icon" data-a="view" title="${isPic?"View":"Play"}">${svg(isPic?"image":"play")}</button>
+      <a class="btn ghost icon" href="${url(f)}?dl=1" title="Download">${svg("download")}</a>
+      ${f.r?"":`<button class="ghost icon danger" data-a="del" title="Delete">${svg("trash")}</button>`}</span></div>`}
+
+function renderMore(){
+  const box=$("#list"),end=Math.min(view.length,shown+PAGE);
+  if(!view.length){box.innerHTML='<div class="card"><div class="empty">No recordings match.</div></div>';$("#morebox").hidden=true;return}
+  let html="",lastCard=box.lastElementChild,lastDay=lastCard?lastCard.dataset.day:null;
+  for(let i=shown;i<end;i++){
+    const f=view[i];
+    if(f.d!==lastDay){
+      if(html)html+="</div>";
+      const dayFiles=view.filter(x=>x.d===f.d),db=dayFiles.reduce((a,x)=>a+x.s,0);
+      html+=`<div class="card" data-day="${esc(f.d)}"><div class="day"><input type="checkbox" data-day="${esc(f.d)}" aria-label="Select day">${esc(new Date(f.d+"T12:00").toLocaleDateString(undefined,{weekday:"long",year:"numeric",month:"long",day:"numeric"}))}<span class="meta">${dayFiles.length} · ${size(db)}</span></div>`;
+      lastDay=f.d;
+    } else if(!html){                       /* continue the last card */
+      lastCard.insertAdjacentHTML("beforeend",rowHtml(f,i));continue}
+    html+=rowHtml(f,i);
+  }
+  if(html)box.insertAdjacentHTML("beforeend",html+(html.startsWith("<div class=\"card\"")?"</div>":""));
+  shown=end;$("#morebox").hidden=shown>=view.length;
+  $("#more").textContent=`Show more (${view.length-shown} left)`;
+  syncDayBoxes()
+}
+
+function syncDayBoxes(){for(const cb of $$("input[data-day]")){const d=cb.dataset.day,files=view.filter(f=>f.d===d&&!f.r);
+  const n=files.filter(f=>sel.has(key(f))).length;cb.checked=n&&n===files.length;cb.indeterminate=n>0&&n<files.length}}
+function updateSel(){const files=all.filter(f=>sel.has(key(f)));
+  $("#selbar").hidden=!files.length;$("#selcount").textContent=`${files.length} selected · ${size(files.reduce((a,f)=>a+f.s,0))}`;syncDayBoxes()}
+
+$("#list").addEventListener("click",async e=>{
+  const dayCb=e.target.closest("input[data-day]");
+  if(dayCb){const d=dayCb.dataset.day;for(const f of view)if(f.d===d&&!f.r){dayCb.checked?sel.add(key(f)):sel.delete(key(f))}
+    for(const row of dayCb.closest(".card").querySelectorAll(".row")){const f=view[+row.dataset.i];const on=sel.has(key(f));row.classList.toggle("sel",on);row.querySelector("input").checked=on}
+    updateSel();return}
+  const row=e.target.closest(".row");if(!row)return;const i=+row.dataset.i,f=view[i];
+  if(e.target.matches("input[type=checkbox]")){if(f.r){e.target.checked=false;toast("This one is still being recorded",true);return}
+    e.target.checked?sel.add(key(f)):sel.delete(key(f));row.classList.toggle("sel",e.target.checked);updateSel();return}
+  const a=e.target.closest("[data-a]");if(!a)return;
+  if(a.dataset.a==="view")openViewer(i);
+  if(a.dataset.a==="del"){if(!confirm("Delete "+f.d+" "+f.n+"?"))return;await removeFiles([f])}
+});
+
+async function removeFiles(files){
+  try{const r=await fetch("/api/rec/delete-many",{method:"POST",headers:{"X-Requested-With":"lsc","Content-Type":"text/plain"},body:files.map(key).join("\n")});
+    if(!r.ok)throw new Error((await r.text()).trim());const j=await r.json();
+    for(const f of files)sel.delete(key(f));toast(`${j.deleted} deleted`);load()}catch(e){toast(e.message,true)}}
+
+$("#del").addEventListener("click",()=>{const files=all.filter(f=>sel.has(key(f)));
+  if(confirm(`Delete ${files.length} recording${files.length===1?"":"s"} (${size(files.reduce((a,f)=>a+f.s,0))})? This cannot be undone.`))removeFiles(files)});
+$("#clear").addEventListener("click",()=>{sel.clear();for(const r of $$(".row.sel")){r.classList.remove("sel");r.querySelector("input").checked=false}updateSel()});
+$("#dl").addEventListener("click",async()=>{const files=all.filter(f=>sel.has(key(f)));
+  try{const r=await fetch("/api/rec/tar",{method:"POST",headers:{"X-Requested-With":"lsc","Content-Type":"text/plain"},body:files.map(key).join("\n")});
+    if(!r.ok)throw new Error((await r.text()).trim());const j=await r.json();
+    toast(`Downloading ${j.files} files (${size(j.bytes)})`);
+    const a=document.createElement("a");a.href="/rec-tar/"+j.token;document.body.appendChild(a);a.click();a.remove()}catch(e){toast(e.message,true)}});
+
+for(const b of $$("#kind button"))b.addEventListener("click",()=>{kind=b.dataset.v;for(const x of $$("#kind button"))x.classList.toggle("on",x===b);apply()});
+for(const id of["from","to","sort"])$("#"+id).addEventListener("change",apply);
+$("#more").addEventListener("click",renderMore);
+$("#reload").addEventListener("click",load);
+
+/* viewer */
+let vi=-1;
+function openViewer(i){vi=i;const f=view[i];if(!f)return;
+  const isPic=f.k==="pic";
+  $("#vmedia").innerHTML=isPic?`<img src="${url(f)}" alt="">`:`<video src="${url(f)}" controls autoplay playsinline></video>`;
+  $("#vname").textContent=`${f.d} ${f.n.slice(0,8).replace(/-/g,":")} · ${KIND[f.k]}`;$("#vmeta").textContent=size(f.s)+(f.r?" · still recording":"");
+  $("#vdl").href=url(f)+"?dl=1";$("#vprev").disabled=i<=0;$("#vnext").disabled=i>=view.length-1;$("#viewer").hidden=false}
+function closeViewer(){$("#viewer").hidden=true;$("#vmedia").innerHTML="";vi=-1}
+$("#vclose").addEventListener("click",closeViewer);
+$("#vprev").addEventListener("click",()=>vi>0&&openViewer(vi-1));
+$("#vnext").addEventListener("click",()=>vi<view.length-1&&openViewer(vi+1));
+$("#viewer").addEventListener("click",e=>{if(e.target.id==="viewer"||e.target.classList.contains("vmain"))closeViewer()});
+addEventListener("keydown",e=>{if($("#viewer").hidden)return;if(e.key==="Escape")closeViewer();if(e.key==="ArrowLeft"&&vi>0)openViewer(vi-1);if(e.key==="ArrowRight"&&vi<view.length-1)openViewer(vi+1)});
+load();
+</script>
+</body>
+</html>

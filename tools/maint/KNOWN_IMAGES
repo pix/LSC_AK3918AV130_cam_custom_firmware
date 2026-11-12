@@ -1,0 +1,6 @@
+45f7b0ea5a8a92bc2defe9c1e4769a2a stock Tuya APP (pristine backup 2026-11-11)
+1f7c7f254cc92b5955b3ba5d6fa4e6ab decloud wizard build 20261111_155035
+fa862e137d53fa5f05caeaab2ad071a3 ak_rtsp-auth v1 (login, web, snapshot, settings) 20261111_165410
+278b861ec86b78d91b2a16ef17fedc1a ak_rtsp-auth v24 (OSD, HTTPS/RTSPS, multi-client, new UI, talk-back) 20261111_211900
+3e2d6cc61913f9e7e8cd1e50a5b1cd8b ak_rtsp-auth v68 (tamper, stock day/night, schedules, sub stream, security fixes, reverse proxy; stripped) 20261112_082506
+346516ca4d8148ac69c72c8706bd37ad ak_rtsp-auth v93 (adjustments fixed vs stock, NR strength, LED activity, mic gain, keep days, backup/restore, dev terminal, load fixes; stripped) 20261112_173916

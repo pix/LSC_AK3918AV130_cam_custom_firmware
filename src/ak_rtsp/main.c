@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <time.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/ioctl.h>
@@ -22,6 +23,30 @@
 #endif
 #include "night.h"
 #include "control.h"
+#include "auth.h"
+#include "web.h"
+#include "resetkey.h"
+#include "system.h"
+#include "netcfg.h"
+#include "qrwifi.h"
+#include "speaker.h"
+#include "osd.h"
+#include "osd_hw.h"
+#include "mqtt.h"
+#include "events.h"
+#include "sounddet.h"
+#include "md.h"
+#include "tamper.h"
+#include "sched.h"
+#include "substream.h"
+#include "term.h"
+#include "npu.h"
+#include "record.h"
+#include "onvif.h"
+#include "imgx.h"
+#include "snapshot.h"
+#include "tls.h"
+#include <sys/time.h>
 #include "vi.h"
 #include "venc.h"
 #include "audio.h"
@@ -112,6 +137,7 @@ static void close_devices(void)
     int i;
     uint32_t chn_id = 0;
 
+    osd_hw_stop();
     ioctl(g_chn0_fd, VENC_IOCTL_DEACTIVATE, &chn_id);
 
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -186,8 +212,122 @@ static void close_devices(void)
  *   audio_start               — open /dev/pcmC0D0c, configure mic capture,
  *                               start its background read() thread
  *                               (non-fatal — video keeps working if this fails)
- *   accept loop               — serve one RTSP client at a time on port 554
+ *   accept loop               — RTSP (554) + RTSPS (322), each session in its own thread
  * ------------------------------------------------------------------------- */
+/* Why the process died: a fatal signal (segfault, bus error, abort...) or a
+ * supervisor kill used to leave no trace in the log, only a restart. The
+ * handler is async-signal-safe (write(2) with a number formatter, no libc
+ * allocation) and records the fault address and instruction pointer, which
+ * can be resolved against the unstripped build. */
+/* In-progress markers of the kernel-crash guards (ae.c, substream.c, venc.c,
+ * osd_hw.c): keep in sync with those files. */
+static const char *const k_guard_files[] = {
+    "/etc/config/ak_rtsp_tnr_guard", "/etc/config/ak_rtsp_sub_guard",
+    "/etc/config/ak_rtsp_venc_guard", "/etc/config/ak_rtsp_osd_guard",
+};
+
+static void log_num(char *p, size_t *n, unsigned long v)
+{
+    char t[24];
+    int k = 0;
+    do { t[k++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (k) p[(*n)++] = t[--k];
+}
+
+static void fatal_signal(int sig, siginfo_t *si, void *uc)
+{
+    char b[224];
+    size_t n = 0;
+    const char *pre = "FATAL: signal ";
+    for (const char *s = pre; *s; s++) b[n++] = *s;
+    log_num(b, &n, (unsigned long)sig);
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL || sig == SIGFPE) {
+        const char *at = " faultaddr=0x";
+        for (const char *s = at; *s; s++) b[n++] = *s;
+        unsigned long a = (unsigned long)si->si_addr;
+        int started = 0;
+        for (int sh = 28; sh >= 0; sh -= 4) {
+            unsigned d = (a >> sh) & 0xf;
+            if (d || started || sh == 0) { b[n++] = "0123456789abcdef"[d]; started = 1; }
+        }
+        const char *pc = " pc=0x";
+        for (const char *s = pc; *s; s++) b[n++] = *s;
+        unsigned long ip = 0;
+#if defined(__arm__)
+        /* ucontext_t: uc_flags, uc_link, stack_t (12 B), then mcontext_t whose
+         * sigcontext starts at +0x14: trap, err, oldmask, r0..r10, fp, ip, sp,
+         * lr, pc -> ARM_pc at +0x5c. */
+        if (uc) ip = *(unsigned long *)((char *)uc + 0x5c);
+#endif
+        started = 0;
+        for (int sh = 28; sh >= 0; sh -= 4) {
+            unsigned d = (ip >> sh) & 0xf;
+            if (d || started || sh == 0) { b[n++] = "0123456789abcdef"[d]; started = 1; }
+        }
+        /* caller, so a crash inside libc can be traced to our call site */
+        const char *lr = " lr=0x";
+        for (const char *s = lr; *s; s++) b[n++] = *s;
+        unsigned long ra = 0;
+#if defined(__arm__)
+        if (uc) ra = *(unsigned long *)((char *)uc + 0x58);
+#endif
+        started = 0;
+        for (int sh = 28; sh >= 0; sh -= 4) {
+            unsigned d = (ra >> sh) & 0xf;
+            if (d || started || sh == 0) { b[n++] = "0123456789abcdef"[d]; started = 1; }
+        }
+    }
+    b[n++] = '\n';
+    ssize_t w = write(2, b, n);
+    int lf = control_sd_log_fd();               /* SD log, when enabled */
+    if (lf >= 0) w = write(lf, b, n);
+    if (sig != SIGTERM && sig != SIGINT && sig != SIGHUP) {
+        /* a real crash: keep the line on CONFIG, shown in the web Health panel */
+        int cf = open(LAST_CRASH_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (cf >= 0) {
+            char t[32];
+            size_t tn = 0;
+            const char *at = "time=";
+            for (const char *s = at; *s; s++) t[tn++] = *s;
+            log_num(t, &tn, (unsigned long)time(NULL));
+            t[tn++] = ' ';
+            w = write(cf, t, tn);
+            w = write(cf, b, n);
+            fsync(cf);
+            close(cf);
+        }
+    }
+    /* We are a process dying with the kernel intact, so whatever else
+     * happened, the kernel-crash guards (TNR reference frames, encoders,
+     * overlay) did not catch a kernel crash: drop their in-progress markers
+     * instead of letting the next start disable those features for good. */
+    for (size_t i = 0; i < sizeof k_guard_files / sizeof k_guard_files[0]; i++)
+        unlink(k_guard_files[i]);
+    (void)w;
+    _exit(128 + sig);
+}
+
+static void install_fatal_handlers(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sigemptyset(&sa.sa_mask);
+    sa.sa_sigaction = fatal_signal;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS,  &sa, NULL);
+    sigaction(SIGILL,  &sa, NULL);
+    sigaction(SIGFPE,  &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);      /* logged too: tells a supervisor kill from a fault */
+    sigaction(SIGINT,  &sa, NULL);
+    sigaction(SIGHUP,  &sa, NULL);
+    memset(&sa, 0, sizeof sa);
+    sigemptyset(&sa.sa_mask);
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &sa, NULL);      /* a peer that closed first must not kill us */
+}
+
 int main(int argc, char **argv)
 {
     /* Very first thing: tees stdout so the TCP tuning server's debug log
@@ -195,6 +335,33 @@ int main(int argc, char **argv)
      * own printf calls). See control.c for why this is a stdout tee rather
      * than per-callsite logging changes. */
     control_start();
+    install_fatal_handlers();
+
+    /* Login store first, then the one-shot SD-card reset files (they may
+     * wipe the login or the saved settings before anything uses them). */
+    auth_init();
+    osd_init();
+    rtsp_register_params();
+    sys_register_params();
+    audio_register_params();
+    mqtt_init();
+    events_init();
+    sounddet_init();
+    md_init();
+    tamper_init();
+    night_init();
+    sched_init();
+    substream_init();
+    web_register_params();
+    term_init();
+    npu_init();
+    venc_register_params();
+    record_init();
+    onvif_init();
+    imgx_init();
+    snapshot_init();
+    resetkey_check_sd();
+    control_load_ext_settings();        /* module settings: needed early (encoder bitrate/GOP) */
 
     int         no_isp_init       = 0;
     const char *grab_then_exit    = NULL;
@@ -271,13 +438,41 @@ int main(int argc, char **argv)
     if (venc_activate()          < 0) goto err;
 
     night_start();  /* needs AE samples flowing, so start after ae_start() */
+    osd_hw_start(); /* burned-in overlay: ISP OSD regions, needs the pipeline running */
+    substream_start();   /* second encoder (video.sub, crash-guarded) */
 
     /* Non-fatal: video streaming must keep working even if mic capture
      * fails to init (e.g. an audio device race — a supervisor-respawned
      * anyka_ipc could still be holding it in some future scenario we
      * haven't hit yet). */
+    speaker_init();   /* amplifier GPIO off before the playback stream starts */
     if (audio_start() < 0)
         printf("[ak_rtsp] audio: init failed, continuing video-only\n");
+
+    /* Saved image/day-night settings, then the web admin page and the
+     * reset-button watcher. */
+    sys_time_set_tz(TIME_DEFAULT_TZ);   /* overridden by saved settings */
+    control_load_settings();
+    imgx_ready();                       /* WDR / privacy masks (crash-guarded) */
+    sys_time_start();
+    net_start();
+    {   /* no saved Wi-Fi network at all: look for a Wi-Fi QR code */
+        FILE *wc = fopen(NET_STA_CONF, "r");
+        char buf[1024] = "";
+        if (wc) { size_t n = fread(buf, 1, sizeof(buf) - 1, wc); buf[n] = 0; fclose(wc); }
+        if (!strstr(buf, "network={")) qrwifi_start(600, "no Wi-Fi configured");
+    }
+    events_start();
+    mqtt_start();
+    md_start();
+    tamper_start();
+    sched_start();
+    record_start();
+    sys_led_start();
+    npu_start();          /* NPU person detection (npu.enabled, guarded) */
+    onvif_start();
+    if (web_start() < 0)      printf("[ak_rtsp] web: failed to start admin page\n");
+    if (resetkey_start() < 0) printf("[ak_rtsp] reset button watcher failed to start\n");
 
     /* Grab-then-exit: DQBUF blocks (O_NONBLOCK temporarily cleared in
      * vi_grab_sub_frame) until the first sub channel frame arrives. */
@@ -309,10 +504,24 @@ int main(int argc, char **argv)
 
     printf("[ak_rtsp] Listening on port %d...\n", RTSP_SERVER_PORT);
 
+    /* RTSPS: same sessions, over TLS (tls.c; handshake refused until the
+     * certificate is ready). Optional: plain RTSP works without it. */
+    int tls_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (tls_fd >= 0) {
+        setsockopt(tls_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        server_addr.sin_port = htons(RTSPS_SERVER_PORT);
+        if (bind(tls_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0 ||
+            listen(tls_fd, 5) < 0) {
+            perror("[ak_rtsp] rtsps bind/listen");
+            close(tls_fd);
+            tls_fd = -1;
+        } else {
+            printf("[ak_rtsp] RTSPS on port %d\n", RTSPS_SERVER_PORT);
+        }
+    }
+
     for (;;) {
-        struct pollfd pfd;
-        pfd.fd     = server_fd;
-        pfd.events = POLLIN;
+        struct pollfd pfds[2] = { { server_fd, POLLIN, 0 }, { tls_fd, POLLIN, 0 } };
 
         /* While waiting for a client, drain the VENC ring so it doesn't wrap.
          * anyka_ipc polls GET_STREAM continuously even without a connected client.
@@ -325,18 +534,20 @@ int main(int argc, char **argv)
             vi_grab_sub_frame(path);
         }
 
-        int p = poll(&pfd, 1, 0);
+        /* 20 ms wait instead of 0: frames arrive every 66 ms (15 fps), so the
+         * ring is still drained ~3x per frame, but the idle loop no longer
+         * pins the CPU at 100% (heat, and starving other threads). */
+        int p = poll(pfds, tls_fd >= 0 ? 2 : 1, 20);
+        drain_venc_ring();          /* every pass: all sessions read from the live hub */
         if (p < 0 && errno != EINTR) { perror("poll"); continue; }
-        if (p <= 0) {
-            drain_venc_ring();
-            continue;
-        }
+        if (p <= 0) continue;
 
+        int is_tls = !(pfds[0].revents & POLLIN) && tls_fd >= 0 && (pfds[1].revents & POLLIN);
         struct sockaddr_storage client_addr;
         socklen_t addr_len = sizeof(client_addr);
-        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
+        int client_fd = accept(is_tls ? tls_fd : server_fd, (struct sockaddr *)&client_addr, &addr_len);
         if (client_fd < 0) { perror("accept"); continue; }
-        handle_client(client_fd, &client_addr, addr_len);
+        rtsp_start_client(client_fd, is_tls, &client_addr, addr_len);   /* own thread (TLS handshake too) */
     }
 
     close(server_fd);
@@ -350,5 +561,12 @@ err:
 #endif
     control_stop();
     close_devices();
+    /* The supervisor restarts us at once; give the kernel encoder/ISP half a
+     * minute to settle instead of starting again on top of a half-freed
+     * channel (that made every retry die even earlier: "input stream buffer
+     * too small" storm from ak_venc). */
+    printf("[ak_rtsp] startup failed, waiting 30 s before exit\n");
+    sync();
+    sleep(30);
     return 1;
 }

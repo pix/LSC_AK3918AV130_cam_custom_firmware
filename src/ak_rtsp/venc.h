@@ -15,3 +15,12 @@ int venc_bind_vi(void);
 
 /* VENC_IOCTL_ACTIVATE — start frame production. */
 int venc_activate(void);
+
+/* Stream settings venc.kbps / venc.gop (take effect at the next start). */
+void venc_register_params(void);
+void venc_startup_ok(void);        /* first frames streamed: clear the crash guard */
+const char *venc_note(void);       /* non-empty if custom settings were skipped */
+int  venc_kbps_now(void);          /* values the running encoder was created with */
+int  venc_gop_now(void);
+int  venc_smart_now(void);         /* smart mode in use: 0 off, 1 ltr, 2 gop */
+void venc_request_idr(void);       /* keyframe now (only with smart encoding; max 1/s) */

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Terminal</title>
+<style>
+:root{--bg:#0c0f14;--bar:#12171e;--line:#232b36;--fg:#d0d5dd;--muted:#98a2b3;--accent:#4f8cff;--ok:#32d583;--warn:#fdb022;--r:8px}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{display:flex;flex-direction:column}
+.bar{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--bar);border-bottom:1px solid var(--line);flex:none;flex-wrap:wrap}
+.bar a{color:var(--muted);text-decoration:none;font-size:13px}.bar a:hover{color:var(--fg)}
+.title{font-weight:600}.grow{flex:1}
+.status{font-size:12.5px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.status.ok{color:var(--ok);border-color:#1f5f3f}.status.warn{color:var(--warn);border-color:#6b4e12}
+button{font:inherit;font-size:13px;height:30px;padding:0 12px;border-radius:6px;border:1px solid var(--line);background:#171d26;color:var(--fg);cursor:pointer}
+button:hover{border-color:var(--accent)}
+.hint{font-size:12px;color:var(--muted)}
+#term{flex:1;min-height:0;padding:8px 10px;overflow:hidden;white-space:pre;outline:none;cursor:text;
+  font:13.5px/1.25 ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;color:var(--fg)}
+#term .cur{background:var(--fg);color:var(--bg)}
+@media (max-width:600px){.hint{display:none}#term{font-size:12px}}
+</style>
+</head>
+<body>
+<div class="bar">
+  <a href="/" title="Back to the camera page">&larr; <span id="name">Camera</span></a>
+  <span class="title">Terminal</span>
+  <span class="status" id="st">Connecting…</span>
+  <span class="grow"></span>
+  <span class="hint">Ctrl+C interrupts · paste with Ctrl+Shift+V · root shell</span>
+  <button id="again" hidden>Reconnect</button>
+  <button id="close">Close session</button>
+</div>
+<div id="term" tabindex="0" role="textbox" aria-label="Terminal"></div>
+<script>
+const $=s=>document.querySelector(s);
+/* ---- a small VT100/xterm subset (no external code) ---- */
+const PAL=["#0c0f14","#f04438","#32d583","#fdb022","#53b1fd","#d444f1","#2ed3b7","#d0d5dd",
+           "#667085","#fd6f8e","#73e2a3","#fec84b","#84caff","#ee46bc","#5fe9d0","#ffffff"];
+class VT{
+  constructor(el,send){this.el=el;this.send=send;this.dec=new TextDecoder();this.st=0;this.vis=true;this.focus=true;this.resize(80,24)}
+  blank(){return{c:" ",f:7,b:0,a:0}}
+  resize(cols,rows){const old=this.g;this.cols=cols;this.rows=rows;
+    this.g=Array.from({length:rows},(_,y)=>Array.from({length:cols},(_,x)=>old&&old[y]&&old[y][x]?old[y][x]:this.blank()));
+    this.x=Math.min(this.x||0,cols-1);this.y=Math.min(this.y||0,rows-1);this.top=0;this.bot=rows-1;this.f=7;this.b=0;this.a=0;this.render()}
+  cell(c){return{c,f:this.f,b:this.b,a:this.a}}
+  scroll(n){for(let i=0;i<n;i++){this.g.splice(this.top,1);this.g.splice(this.bot,0,Array.from({length:this.cols},()=>this.blank()))}}
+  rscroll(n){for(let i=0;i<n;i++){this.g.splice(this.bot,1);this.g.splice(this.top,0,Array.from({length:this.cols},()=>this.blank()))}}
+  lf(){if(this.y===this.bot)this.scroll(1);else if(this.y<this.rows-1)this.y++}
+  write(bytes){const s=this.dec.decode(bytes,{stream:true});for(const ch of s)this.put(ch);this.render()}
+  put(ch){const o=ch.codePointAt(0);
+    if(this.st===1){this.esc(ch);return}
+    if(this.st===2){if(o>=0x30&&o<=0x3f){this.p+=ch;return}if(o>=0x20&&o<=0x2f)return;this.st=0;this.csi(ch);return}
+    if(this.st===3){if(o===7||(this.oscEsc&&ch==="\\"))this.st=0;this.oscEsc=o===27;return}
+    if(this.st===4){this.st=0;return}
+    if(o===27){this.st=1;return}
+    if(o===13){this.x=0;return} if(o===10||o===11||o===12){this.lf();return}
+    if(o===8){if(this.x>0)this.x--;return} if(o===9){this.x=Math.min(this.cols-1,(Math.floor(this.x/8)+1)*8);return}
+    if(o<32||o===127)return;
+    if(this.x>=this.cols){this.x=0;this.lf()}
+    this.g[this.y][this.x]=this.cell(ch);this.x++}
+  esc(ch){this.st=0;
+    if(ch==="["){this.st=2;this.p="";return} if(ch==="]"){this.st=3;this.oscEsc=false;return}
+    if(ch==="("||ch===")"){this.st=4;return}
+    if(ch==="7")this.sv=[this.x,this.y]; else if(ch==="8"&&this.sv)[this.x,this.y]=this.sv;
+    else if(ch==="M"){if(this.y===this.top)this.rscroll(1);else if(this.y>0)this.y--}
+    else if(ch==="D")this.lf(); else if(ch==="E"){this.x=0;this.lf()}
+    else if(ch==="c"){for(const r of this.g)r.fill(this.blank());this.x=this.y=0;this.top=0;this.bot=this.rows-1}}
+  erase(y,x0,x1){for(let x=x0;x<x1;x++)this.g[y][x]={c:" ",f:7,b:this.b,a:0}}
+  csi(fin){const priv=this.p.startsWith("?");const ps=(priv?this.p.slice(1):this.p).split(";").map(v=>parseInt(v,10));
+    const n=(i,d=1)=>isNaN(ps[i])||ps[i]===0?d:ps[i];const cl=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+    switch(fin){
+    case"A":this.y=cl(this.y-n(0),0,this.rows-1);break; case"B":this.y=cl(this.y+n(0),0,this.rows-1);break;
+    case"C":this.x=cl(this.x+n(0),0,this.cols-1);break; case"D":this.x=cl(Math.min(this.x,this.cols-1)-n(0),0,this.cols-1);break;
+    case"E":this.x=0;this.y=cl(this.y+n(0),0,this.rows-1);break; case"F":this.x=0;this.y=cl(this.y-n(0),0,this.rows-1);break;
+    case"G":case"`":this.x=cl(n(0)-1,0,this.cols-1);break; case"d":this.y=cl(n(0)-1,0,this.rows-1);break;
+    case"H":case"f":this.y=cl(n(0)-1,0,this.rows-1);this.x=cl(n(1)-1,0,this.cols-1);break;
+    case"J":{const m=isNaN(ps[0])?0:ps[0],x=Math.min(this.x,this.cols);
+      if(m===0){this.erase(this.y,x,this.cols);for(let y=this.y+1;y<this.rows;y++)this.erase(y,0,this.cols)}
+      else if(m===1){this.erase(this.y,0,x+1);for(let y=0;y<this.y;y++)this.erase(y,0,this.cols)}
+      else for(let y=0;y<this.rows;y++)this.erase(y,0,this.cols);break}
+    case"K":{const m=isNaN(ps[0])?0:ps[0],x=Math.min(this.x,this.cols);
+      if(m===0)this.erase(this.y,x,this.cols);else if(m===1)this.erase(this.y,0,x+1);else this.erase(this.y,0,this.cols);break}
+    case"L":if(this.y>=this.top&&this.y<=this.bot){const t=this.top;this.top=this.y;this.rscroll(n(0));this.top=t}break;
+    case"M":if(this.y>=this.top&&this.y<=this.bot){const t=this.top;this.top=this.y;this.scroll(n(0));this.top=t}break;
+    case"P":{const r=this.g[this.y];r.splice(this.x,n(0));while(r.length<this.cols)r.push(this.blank());break}
+    case"@":{const r=this.g[this.y];for(let i=0;i<n(0);i++)r.splice(this.x,0,this.blank());r.length=this.cols;break}
+    case"X":this.erase(this.y,this.x,Math.min(this.cols,this.x+n(0)));break;
+    case"S":this.scroll(n(0));break; case"T":this.rscroll(n(0));break;
+    case"r":this.top=cl(n(0)-1,0,this.rows-1);this.bot=cl(n(1,this.rows)-1,this.top,this.rows-1);this.x=0;this.y=this.top;break;
+    case"s":this.sv=[this.x,this.y];break; case"u":if(this.sv)[this.x,this.y]=this.sv;break;
+    case"n":if(ps[0]===6)this.send(`\x1b[${this.y+1};${Math.min(this.x,this.cols-1)+1}R`);break;
+    case"h":case"l":if(priv){const on=fin==="h";
+      if(ps.includes(25))this.vis=on;
+      if(ps.includes(1049)||ps.includes(47)){if(on){this.alt=this.g.map(r=>r.slice());for(const r of this.g)r.fill(this.blank())}
+        else if(this.alt){this.g=this.alt;this.alt=null}}}break;
+    case"m":{if(!this.p)ps[0]=0;for(let i=0;i<ps.length;i++){const v=isNaN(ps[i])?0:ps[i];
+      if(v===0){this.f=7;this.b=0;this.a=0} else if(v===1)this.a|=1; else if(v===22)this.a&=~1;
+      else if(v===7)this.a|=2; else if(v===27)this.a&=~2;
+      else if(v>=30&&v<=37)this.f=v-30; else if(v>=90&&v<=97)this.f=v-82; else if(v===39)this.f=7;
+      else if(v>=40&&v<=47)this.b=v-40; else if(v>=100&&v<=107)this.b=v-92; else if(v===49)this.b=0;
+      else if(v===38||v===48)i+=ps[i+1]===5?2:4}break}
+    }}
+  render(){if(this.pend)return;this.pend=requestAnimationFrame(()=>{this.pend=0;
+    const esc=c=>c==="&"?"&amp;":c==="<"?"&lt;":c===">"?"&gt;":c;let h="";
+    for(let y=0;y<this.rows;y++){let run="",key="";const flush=()=>{if(run){h+=key==="cur"?`<span class="cur">${run}</span>`:key?`<span style="${key}">${run}</span>`:run;run=""}};
+      for(let x=0;x<this.cols;x++){const c=this.g[y][x];const cur=this.vis&&this.focus&&y===this.y&&x===Math.min(this.x,this.cols-1);
+        let f=c.f,b=c.b;if(c.a&1&&f<8)f+=8;if(c.a&2)[f,b]=[b,f];
+        const k=cur?"cur":(f!==7||b!==0?`color:${PAL[f]};background:${b?PAL[b]:"transparent"}`:"")+(!cur&&c.a&1?";font-weight:700":"");
+        if(k!==key){flush();key=k}
+        run+=esc(c.c)}
+      flush();h+="\n"}
+    this.el.innerHTML=h})}
+}
+/* ---- session ---- */
+const el=$("#term");let ws=null,closedByUs=false;
+const term=new VT(el,s=>send(s));
+const KEYS={ArrowUp:"\x1b[A",ArrowDown:"\x1b[B",ArrowRight:"\x1b[C",ArrowLeft:"\x1b[D",Home:"\x1b[H",End:"\x1b[F",
+  PageUp:"\x1b[5~",PageDown:"\x1b[6~",Insert:"\x1b[2~",Delete:"\x1b[3~",Enter:"\r",Backspace:"\x7f",Tab:"\t",Escape:"\x1b",
+  F1:"\x1bOP",F2:"\x1bOQ",F3:"\x1bOR",F4:"\x1bOS"};
+function send(s){if(ws&&ws.readyState===1)ws.send(new TextEncoder().encode(s))}
+function status(t,cls){const s=$("#st");s.textContent=t;s.className="status"+(cls?" "+cls:"")}
+function fit(){const probe=document.createElement("span");probe.textContent="M".repeat(20);el.appendChild(probe);
+  const r=probe.getBoundingClientRect();probe.remove();const cw=r.width/20,ch=r.height||16;
+  const cols=Math.max(20,Math.min(300,Math.floor((el.clientWidth-20)/cw)));
+  const rows=Math.max(5,Math.min(150,Math.floor((el.clientHeight-16)/ch)));
+  if(cols!==term.cols||rows!==term.rows)term.resize(cols,rows);
+  if(ws&&ws.readyState===1)ws.send("\0R"+cols+"x"+rows)}
+el.addEventListener("keydown",e=>{if(!ws)return;let s=null;
+  if(e.ctrlKey&&e.shiftKey&&(e.key==="V"||e.key==="v"||e.key==="C"||e.key==="c"))return;   /* browser paste / copy */
+  if(e.ctrlKey&&!e.altKey&&e.key.length===1){const c=e.key.toUpperCase().charCodeAt(0);if(c>=64&&c<=95)s=String.fromCharCode(c-64)}
+  else if(KEYS[e.key])s=KEYS[e.key];
+  else if(e.key.length===1&&!e.metaKey)s=(e.altKey?"\x1b":"")+e.key;
+  if(s!==null){e.preventDefault();send(s)}});
+el.addEventListener("paste",e=>{e.preventDefault();send((e.clipboardData.getData("text")||"").replace(/\r?\n/g,"\r"))});
+el.addEventListener("focus",()=>{term.focus=true;term.render()});
+el.addEventListener("blur",()=>{term.focus=false;term.render()});
+window.addEventListener("resize",()=>{clearTimeout(window._f);window._f=setTimeout(fit,150)});
+async function connect(){
+  closedByUs=false;$("#again").hidden=true;status("Connecting…");
+  try{const r=await fetch("/api/term/token",{headers:{"X-Requested-With":"lsc"}});
+    if(!r.ok)throw new Error((await r.text()).trim()||r.statusText);
+    const {token}=await r.json();fit();
+    ws=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/api/term?t="+token);
+    ws.binaryType="arraybuffer";
+    ws.onopen=()=>{status("Connected","ok");fit();el.focus()};
+    ws.onmessage=e=>term.write(new Uint8Array(e.data));
+    ws.onclose=e=>{ws=null;status(closedByUs?"Session closed":"Disconnected","warn");$("#again").hidden=false}}
+  catch(e){status(e.message,"warn");$("#again").hidden=false}}
+$("#close").addEventListener("click",()=>{closedByUs=true;if(ws)ws.close()});
+$("#again").addEventListener("click",()=>{term.write(new TextEncoder().encode("\r\n"));connect()});
+el.addEventListener("click",()=>el.focus());
+fetch("/api/status").then(r=>r.json()).then(s=>{if(s.name){$("#name").textContent=s.name;document.title="Terminal · "+s.name}}).catch(()=>{});
+connect();
+</script>
+</body>
+</html>

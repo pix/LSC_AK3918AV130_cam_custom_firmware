@@ -132,10 +132,30 @@ int ircut_init(void)
 /* Runtime day/night switch — filter position + IR LED together, matching
  * stock anyka_ipc's coordinated switch (night_mode_def=0 = NIGHT_MODE_IRLED
  * in _ht_hw_settings.ini: IR LED is part of night mode on this hardware). */
+static volatile int g_ir_mode;      /* 0 auto (follow night), 1 force on, 2 force off */
+static volatile int g_is_night_now;
+
+static int ir_led_level(void)
+{
+    return g_ir_mode == 1 ? 1 : g_ir_mode == 2 ? 0 : g_is_night_now;
+}
+
+void ircut_set_ir_mode(int mode)
+{
+    if (mode < 0 || mode > 2) return;
+    g_ir_mode = mode;
+    gpio_set(IR_LED_GPIO, ir_led_level());
+    printf("[ak_rtsp] ircut: IR LED mode %s (LED %s)\n",
+           mode == 1 ? "on" : mode == 2 ? "off" : "auto", ir_led_level() ? "on" : "off");
+}
+
+int ircut_get_ir_mode(void) { return g_ir_mode; }
+
 void ircut_switch(int night)
 {
     ircut_set_state(night);
-    gpio_set(IR_LED_GPIO, night ? 1 : 0);
+    g_is_night_now = night;
+    gpio_set(IR_LED_GPIO, ir_led_level());
     printf("[ak_rtsp] ircut: switched to %s mode (IR LED %s)\n",
-           night ? "NIGHT" : "DAY", night ? "on" : "off");
+           night ? "NIGHT" : "DAY", ir_led_level() ? "on" : "off");
 }

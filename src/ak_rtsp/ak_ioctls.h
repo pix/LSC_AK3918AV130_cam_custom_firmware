@@ -18,7 +18,8 @@
 
 /* Sensor frame rate */
 #define ISP_INNER_SET_SENSOR_FPS   0x4004497a  /* Ak_ISP_Set_Sensor_Fps    @ 0x00145ce4   */
-#define ISP_INNER_GET_SENSOR_FPS   0x8004497b  /* Ak_ISP_Get_Sensor_Fps    @ 0x00145cf4   */
+#define ISP_INNER_GET_SENSOR_FPS   0x8004497b
+#define ISP_INNER_SET_FLIP_MIRROR  0x40044979  /* Ak_ISP_Set_Flip_Mirror @ 0x0014ab90: payload u32[2] = {flip, mirror} */  /* Ak_ISP_Get_Sensor_Fps    @ 0x00145cf4   */
 
 /* AE — exposure attribute (0x720-byte struct) */
 #define ISP_INNER_GET_AE_RUN_INFO  0x80044952  /* AK_ISP_get_ae_run_info   36 B stat      */
@@ -63,6 +64,7 @@
 #define VENC_IOCTL_DEACTIVATE     0x400456f5  /* _IOW('V',0xf5, uint32) stop  encoder */
 #define VENC_IOCTL_GET_STREAM     0x402056ea  /* _IOW('V',0xea, venc_stream_req[32]) */
 #define VENC_IOCTL_RELEASE_STREAM 0x402056ff  /* _IOW('V',0xff, venc_stream_req[32]) */
+#define VENC_IOCTL_REQUEST_IDR    0x400456f3  /* _IOW('V',0xf3, uint32) next frame is an IDR (stock ak_venc_request_idr -> AKV_Encoder_Set_EncIFrame) */
 
 /* /dev/v4l-subdev0 — sensor subdev (sensor I2C register programming) */
 #define ISP_SENSOR_INIT_IOCTL 0x40085301  /* _IOW('S',1,8) — program sensor via I2C reg table */
@@ -592,6 +594,28 @@ struct akpcm_pars {
 #define AKPCM_IOC_GET_PERIODS   0x40045030  /* _IOR('P',0x30,4) */
 
 /* Best-guess name "CAPS" — nr=0x81, GET only, observed value 1. */
+/* On the PLAYBACK fd 0x40045081 is the speaker/amplifier enable (int 0/1):
+ * stock anyka_ipc osal_ao_enable_speaker() = ioctl(fd, 0x40045081, &on),
+ * ak_pcm.ko playback_ioctl handler @0x2c80 copy_from_user -> hwparams ->
+ * gpiod_direction_output_raw. (Named GET_CAPS below from the capture side.) */
+#define AKPCM_IOC_SPK_ENABLE    0x40045081
+/* Real directions per stock anyka_ipc's own function names (osal_ao_*):
+ * 0x40045010 = set_source (int), 0x80045010 = get_source,
+ * 0x40045030 = set_gain   (int), 0x80045030 = get_gain.
+ * Stock enables the speaker as: get_source; if 0 -> set_source(4);
+ * enable_speaker(1)  (anyka_ipc @0x157f4c, called from AK_MPI_AO_Enable). */
+#define AKPCM_IOC_AO_SET_SOURCE 0x40045010
+#define AKPCM_IOC_AO_GET_SOURCE 0x80045010
+#define AKPCM_IOC_AO_SET_GAIN   0x40045030
+#define AKPCM_IOC_AO_GET_GAIN   0x80045030
+/* Capture side, same numbers: ak_pcm.ko capture_ioctl 0x40045030 =
+ * get_user + clamp to 7 (analog mic gain 0..7, stored per input source);
+ * 0x80045030 = put_user of the current gain. Stock osal_ai_set_gain(fd, g)
+ * (anyka_ipc @0x1e8ac4) takes 0..8 and sends g ? g-1 : 0. The capture
+ * "SET_PERIODS(2)" in our init sequence is really this GET. */
+#define AKPCM_IOC_AI_SET_GAIN   0x40045030
+#define AKPCM_IOC_AI_GET_GAIN   0x80045030
+#define AKPCM_AO_SOURCE_DAC     4
 #define AKPCM_IOC_GET_CAPS      0x40045081  /* _IOR('P',0x81,4) */
 
 /* dir=NONE (no size in the request itself) — the 3rd ioctl() arg is used

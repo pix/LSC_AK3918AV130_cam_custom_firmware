@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <stdint.h>
 #include <string.h>
 #include <pthread.h>
@@ -7,6 +9,10 @@
 #include "ak_ioctls.h"
 #include "isp.h"
 #include "ae.h"
+#include "imgx.h"
+
+extern int g_isp_fd;
+static void tnr_ref_buffers(uint32_t w, uint32_t h);
 
 /* -------------------------------------------------------------------------
  * AE init — kernel-driven, ticked from userspace.
@@ -43,6 +49,7 @@
 #define AE_EXP_MAX        32767 /* exp_time_max ceiling (isp_pipeline_init default is a broken 2) */
 
 static volatile int g_ae_running;
+static int          g_ae_started;         /* ae_start() created the thread */
 static pthread_t    g_ae_tid;
 
 /* Latest AE sample, updated every tick — read by night.c's day/night monitor
@@ -82,7 +89,7 @@ void ae_report_stats(int lum, uint32_t hw_exp, uint32_t hw_sgain, uint32_t hw_is
  * AE sliders, baked in as the new compile-time defaults for this deployment
  * (previously stable_range=hold_range=speed=10, exp_max=AE_EXP_MAX/32767). */
 static ae_tuning_t g_tuning = { .stable_range = 4, .hold_range = 4, .speed = 7,
-                                 .exp_max = 1039, .enabled = 1 };
+                                 .exp_max = 2, .enabled = 1 };
 
 void ae_get_tuning(ae_tuning_t *out) { *out = g_tuning; }
 
@@ -95,6 +102,7 @@ int ae_set_tuning(const ae_tuning_t *in)
     if (isp_tunnel(ISP_INNER_GET_EXPOSURE, expo) != 0) return -1;
     uint32_t *pub = (uint32_t *)(expo + 0x1c);
     pub[1]  = g_tuning.exp_max;
+    pub[8]  = (uint32_t)imgx_flicker_step();   /* anti-flicker: exposure step (lines per half period) */
     pub[9]  = g_tuning.stable_range;
     pub[10] = g_tuning.hold_range;
     pub[11] = g_tuning.speed;
@@ -212,7 +220,68 @@ int ae_init_isp_params(void)
     if (isp_tunnel(ISP_INNER_3D_NR_REF, nr_ref) == 0)
         printf("[ae] 3D_NR_REF OK\n");
 
+    tnr_ref_buffers(nr_ref[0], nr_ref[1]);
+
     return 0;
+}
+
+/* 3D NR (temporal noise reduction) reference frames.
+ * ak_isp.ko allocates them when /dev/isp-param-0 is mmapped (isp_param_file_mmap
+ * -> priv_dma_alloc -> ak_isp_vp_set_3d_nr_ref_addr); stock does this in
+ * ak_vi_set_dev_attr -> isp_3D_NR_create with w*h*3/2*5/4 + 64 bytes, after
+ * AK_ISP_set_3d_nr_ref_attr and before STREAMON. Without it TNR has no
+ * reference frame: no temporal denoise and no per-block motion statistic.
+ * Crash guard (against a kernel crash, which is what a bad TNR setup does):
+ * a marker is kept until the encoder has delivered 150 frames with TNR on
+ * (ae_tnr_confirm(), ~10 s). If the box went down before that, the next start
+ * skips TNR and leaves TNR_OFF; choosing the hardware motion detector again
+ * removes it (ae_tnr_retry). A process death we can see (any signal, a
+ * reboot) removes the marker in main.c's handler: the kernel survived it.
+ * Previously the marker lived 90 s, so a quick reboot or an unrelated crash
+ * in that window turned TNR - and with it hardware motion detection - off
+ * for good, silently. */
+#define TNR_GUARD "/etc/config/ak_rtsp_tnr_guard"
+#define TNR_OFF   "/etc/config/ak_rtsp_tnr_off"
+static void *g_tnr_map;
+static int g_tnr_state;            /* 0 off, 1 on, -1 skipped by the guard */
+static int g_tnr_guarded;
+int ae_tnr_state(void) { return g_tnr_state; }
+
+void ae_tnr_confirm(void)
+{
+    if (!g_tnr_guarded) return;
+    g_tnr_guarded = 0;
+    unlink(TNR_GUARD); sync();
+    printf("[ae] 3D NR reference frames: start confirmed\n");
+}
+
+void ae_tnr_retry(void)
+{
+    if (unlink(TNR_OFF) == 0) { sync(); printf("[ae] 3D NR reference frames will be retried at the next start\n"); }
+}
+
+static void tnr_ref_buffers(uint32_t w, uint32_t h)
+{
+    if (access(TNR_OFF, F_OK) == 0) { g_tnr_state = -1; printf("[ae] 3D NR reference frames disabled (%s)\n", TNR_OFF); return; }
+    if (access(TNR_GUARD, F_OK) == 0) {
+        rename(TNR_GUARD, TNR_OFF); sync();
+        g_tnr_state = -1;
+        fprintf(stderr, "[ae] 3D NR reference frames skipped: the previous start with them did not complete\n");
+        return;
+    }
+    int gfd = open(TNR_GUARD, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (gfd >= 0) { fsync(gfd); close(gfd); sync(); }
+    size_t len = (size_t)w * h * 3 / 2 * 5 / 4 + 64;
+    g_tnr_map = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, g_isp_fd, 0);
+    if (g_tnr_map == MAP_FAILED) {
+        g_tnr_map = NULL;
+        perror("[ae] 3D NR reference mmap");
+        unlink(TNR_GUARD); sync();
+        return;
+    }
+    g_tnr_state = 1;
+    g_tnr_guarded = 1;
+    printf("[ae] 3D NR reference frames: %zu bytes\n", len);
 }
 
 /* Windowed AE diagnostics: sample lum/hw_exp every tick (~15Hz) instead of
@@ -307,11 +376,16 @@ int ae_start(void)
         g_ae_running = 0;
         return -1;
     }
+    g_ae_started = 1;
     return 0;
 }
 
 void ae_stop(void)
 {
+    /* main's error path calls this even when ae_start() never ran; joining a
+     * NULL tid is a segfault in musl (see night_stop()). */
+    if (!g_ae_started) return;
+    g_ae_started = 0;
     g_ae_running = 0;
     pthread_join(g_ae_tid, NULL);
 }

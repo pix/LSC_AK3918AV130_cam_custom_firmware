@@ -12,3 +12,8 @@ int ircut_init(void);
  * position at runtime. Called by night.c's auto day/night monitor after
  * ircut_init() has already run. */
 void ircut_switch(int night);
+
+/* IR LED override: 0 = auto (on in night mode), 1 = force on, 2 = force off.
+ * The IR-cut filter keeps following day/night either way. */
+void ircut_set_ir_mode(int mode);
+int  ircut_get_ir_mode(void);

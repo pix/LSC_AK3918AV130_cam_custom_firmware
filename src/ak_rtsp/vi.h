@@ -13,3 +13,8 @@ int vi_start_capture(void);
  * Trigger via: kill -USR1 $(pidof ak_rtsp)
  * View on PC: ffplay -f rawvideo -video_size 640x360 -pixel_format nv12 <file> */
 int vi_grab_sub_frame(const char *path);
+#include <stdint.h>
+#include <stddef.h>
+int vi_copy_sub_frame(uint8_t *dst, size_t cap, int *w, int *h);
+int vi_copy_td_luma(uint8_t *dst, size_t cap, int *w, int *h);
+int vi_td_zoom_active(void);

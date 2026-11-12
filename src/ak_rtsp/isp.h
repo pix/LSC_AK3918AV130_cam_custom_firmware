@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 
 /* Load the GC20C3 sensor I2C register table from /tmp/sensor_isp.conf and
  * program it into the sensor via ioctl on /dev/v4l-subdev0. */
@@ -44,13 +45,26 @@ int isp_set_wb_manual(uint16_t r_gain, uint16_t g_gain, uint16_t b_gain);
  *   - brightness: the LIVE 0x720-byte exposure-attr struct ae.c's AE
  *     thread also polls — a different, riskier mechanism than the other
  *     three; see isp_set_brightness()'s comment for the safety reasoning.
- *   - sharpness: rescales most of a ~46KB blob (module 0x0b) from a cached
- *     baseline; a secondary 16-group sub-block is a known, documented gap
- *     (not the dominant visual effect). */
+ *   - sharpness: rescales the ~46KB blob (module 0x0b) from a cached
+ *     baseline: block 0 and the 16 per-gain blocks, like stock. */
 int isp_set_saturation(int value);
 int isp_set_contrast(int value);
 int isp_set_brightness(int value);
 int isp_set_sharpness(int value);
+/* Noise reduction strength -50..50 (0 = calibrated): scales the sigma of the
+ * luma (NR2) and chroma (UVNR) filters by 2^(3*value/50) (1/8x..8x). */
+int isp_set_nr(int value);
+int isp_get_nr(void);
+
+/* Sensor readout orientation: flip = vertical, mirror = horizontal;
+ * both = 180 degree rotation (camera mounted upside down). */
+int isp_set_flip_mirror(int flip, int mirror);
+
+/* Debug: AE run info + exposure struct words as JSON (GET /api/isp/ae). */
+int isp_ae_debug_json(char *out, size_t cap);
+/* Debug: hex of the first len bytes of a read-only attribute (nr1, nr2, uvnr,
+ * 3dnr, expo). Returns the hex length or -1. */
+int isp_debug_get_hex(const char *m, size_t len, char *out, size_t cap);
 
 /* Forget cached picture-control baselines — call after any full pipeline
  * reload (isp_pipeline_init()/isp_pipeline_init_night()) so a subsequent
