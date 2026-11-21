@@ -27,7 +27,10 @@ TEMPLATES="$SCRIPT_DIR/../../tools/firmware_patch_templates"
 APP_EXTRACTED="${APP_EXTRACTED:-$SCRIPT_DIR/app_extracted}"
 FW_DIR="${FW_DIR:-$SCRIPT_DIR}"
 PATCHED="$FW_DIR/app_patched"
-BINARY="$SCRIPT_DIR/ak_rtsp"
+# the stripped build fits the 5 MiB APP partition; the full one (debug
+# symbols, ~5 MB) is for llvm-addr2line on crash records
+BINARY="$SCRIPT_DIR/ak_rtsp_stripped"
+[ -f "$BINARY" ] || { echo "FATAL: $BINARY missing: run make ak_rtsp_stripped first." >&2; exit 1; }
 
 if [ ! -d "$APP_EXTRACTED" ]; then
     echo "FATAL: $APP_EXTRACTED not found." >&2

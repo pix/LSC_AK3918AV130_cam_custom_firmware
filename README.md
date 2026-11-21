@@ -192,6 +192,17 @@ Keep a copy of `/mnt/original_firmware/` safely on your computer!
 
 ## Quick Installation Guide
 
+**Easiest, on Linux: the Decloud Wizard** (`tools/decloud_wizard/`, from
+[Action-Smart-Connect-Flasher](https://github.com/4ddict/Action-Smart-Connect-Flasher), MIT). It prepares the
+SD card, backs up all flash partitions, builds this repository's firmware from your own camera's dump, and
+flashes it with verification and automatic restore of the stock APP on failure:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pix/LSC_AK3918AV130_cam_custom_firmware/main/tools/decloud_wizard/install.sh -o /tmp/lsc-decloud-wizard.sh && bash /tmp/lsc-decloud-wizard.sh
+```
+
+Manual steps (any OS):
+
 ### Step 1: Prepare the MicroSD Card
 Format a MicroSD card as FAT32 and copy the following files:
 - `custom_firmware/ak_rtsp_firmware_YYYYMMDD_HHMMSS.squashfs` (the padded firmware image — see

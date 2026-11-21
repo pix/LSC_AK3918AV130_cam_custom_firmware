@@ -79,6 +79,13 @@ they take the camera address as first argument or `CAMERA_IP`.
   level, so the fixed-point SpeexDSP filter needs pre-scaling; at high volume the mic saturates, hence voice
   ducking while talk-back plays. A phone near the camera closes a loop no camera-side canceller sees
   (camera speaker → phone mic): the talk-back page sends close-talk sound only (no browser AGC, gate).
+- **TLS on a fresh install** (found installing a second, stock camera with the Decloud Wizard): with musl,
+  mbedTLS read `/dev/random`, which blocks on this 4.4 kernel (54 bits of entropy: HTTPS stuck at
+  "Starting"), so a `getrandom()` entropy source is used. mbedTLS rejects certificates with an unknown
+  critical extension, so the camera's own CA (critical NameConstraints) is parsed with a callback accepting
+  just that extension. With no DNS SAN, OpenSSL/GnuTLS/NSS check the server certificate's CN against the
+  DNS constraints, so an address-only certificate has no CN. Checked with openssl s_client, curl,
+  gnutls-cli, ffmpeg RTSPS (`-tls_verify 1`) and Python `ssl` against the camera CA.
 - **Hardware motion statistics** were seen frozen in bright daylight (identical across reboots); the software
   source works there.
 

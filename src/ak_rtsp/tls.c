@@ -17,6 +17,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/random.h>
 
 #include "mbedtls/ssl.h"
 #include "mbedtls/ssl_cache.h"
@@ -30,9 +31,9 @@
 #include "mbedtls/oid.h"
 #include "mbedtls/platform_util.h"
 #include "mbedtls/sha256.h"
+#include "mbedtls/pem.h"
 #include "mbedtls/error.h"
 #include "mbedtls/base64.h"
-#include "mbedtls/pem.h"
 
 #define F_CA_KEY  TLS_DIR "/ak_rtsp_tls_ca.key"
 #define F_CA_CRT  TLS_DIR "/ak_rtsp_tls_ca.crt"
@@ -256,12 +257,44 @@ static int load_key(mbedtls_pk_context *pk, const char *path)
     return ret;
 }
 
+/* Our CA carries a critical NameConstraints extension (private names and
+ * addresses only, see ca_name_constraints). mbedTLS does not implement it and
+ * rejects any certificate with an unknown critical extension, so a freshly
+ * created CA could not be loaded back (HTTPS stuck at "CA certificate
+ * missing", recreating the CA every 20 s; CAs made before the extension was
+ * added were not affected). Accept exactly that extension when loading our
+ * own CA: the camera only signs with it, clients enforce the constraint.
+ * Every other certificate (MQTT broker CAs, uploads) is parsed strictly. */
+static int own_ca_ext_cb(void *ctx, mbedtls_x509_crt const *crt, mbedtls_x509_buf const *oid,
+                         int critical, const unsigned char *p, const unsigned char *end)
+{
+    (void)ctx; (void)crt; (void)critical; (void)p; (void)end;
+    return MBEDTLS_OID_CMP(MBEDTLS_OID_NAME_CONSTRAINTS, oid) == 0 ? 0 : -1;
+}
+
+static int parse_own_ca(mbedtls_x509_crt *crt, const char *pem)   /* pem NUL-terminated */
+{
+    mbedtls_pem_context pc;
+    mbedtls_pem_init(&pc);
+    size_t used = 0;
+    int ret = mbedtls_pem_read_buffer(&pc, "-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----",
+                                      (const unsigned char *)pem, NULL, 0, &used);
+    if (!ret) {
+        size_t dl = 0;
+        const unsigned char *der = mbedtls_pem_get_buffer(&pc, &dl);
+        ret = der ? mbedtls_x509_crt_parse_der_with_ext_cb(crt, der, dl, 1, own_ca_ext_cb, NULL) : -1;
+    }
+    mbedtls_pem_free(&pc);
+    return ret;
+}
+
 static int load_crt(mbedtls_x509_crt *crt, const char *path)
 {
     char *buf = malloc(32768);                 /* CA bundles */
     if (!buf) return -1;
     int n = read_file(path, buf, 32768);
-    int ret = n <= 0 ? -1 : mbedtls_x509_crt_parse(crt, (unsigned char *)buf, (size_t)n + 1);
+    int ret = n <= 0 ? -1 : !strcmp(path, F_CA_CRT) ? parse_own_ca(crt, buf)
+                          : mbedtls_x509_crt_parse(crt, (unsigned char *)buf, (size_t)n + 1);
     free(buf);
     return ret;
 }
@@ -412,7 +445,8 @@ static int ensure_ca(int force)
  * (addresses, names, CA) means it must be re-issued. */
 static void make_stamp(const char *ips, const char *names, const char *ca_fp, char *out, size_t cap)
 {
-    snprintf(out, cap, "ip=%s\ndns=%s\nca=%.64s\n", ips, names, ca_fp);
+    /* v=3: no CN when there are no names (re-issue certificates made before) */
+    snprintf(out, cap, "v=3\nip=%s\ndns=%s\nca=%.64s\n", ips, names, ca_fp);
 }
 
 static int install_pair(void)
@@ -514,9 +548,16 @@ static int ensure_server_cert(int force)
 
     char subj[300], issuer[256];
     unsigned char pem[2048];
-    char first[16];                              /* CN: first name, else first IP */
+    char first[16];                              /* label: first name, else first IP */
     snprintf(first, sizeof first, "%.*s", (int)strcspn(ips, ","), ips);
-    snprintf(subj, sizeof subj, "CN=%s,O=ak_rtsp", g_nnames ? g_names[0] : first[0] ? first : "camera");
+    /* Clients match the SANs, never the CN. But when a certificate has no DNS
+     * SAN, OpenSSL (curl, Python), GnuTLS (ffmpeg) and NSS check its CN against
+     * the CA's DNS name constraints: CN=192.168.1.5 fails ("permitted subtree
+     * violation", "violates the signer's constraints"). So with addresses
+     * only there is no CN; the OU is a readable label nobody checks. With
+     * names, CN = the first name, which is also a DNS SAN. */
+    if (g_nnames) snprintf(subj, sizeof subj, "CN=%s,O=ak_rtsp", g_names[0]);
+    else snprintf(subj, sizeof subj, "O=ak_rtsp,OU=LSC camera %s", first);
     if (!ret) ret = mbedtls_x509_dn_gets(issuer, sizeof issuer, &ca.subject) < 0 ? -1 : 0;
     time_t nb = now_or_build(NULL) - DAY;
     if (!ret) ret = make_cert(&key, &cakey, subj, issuer, 0, nb, nb + (time_t)SRV_DAYS * DAY,
@@ -582,6 +623,7 @@ int tls_init(void)
     }
     pthread_mutex_unlock(&g_lock);
 
+    g_err[0] = 0;                               /* an earlier attempt's error (e.g. "no IP address yet") is over */
     if (conf_done) { g_ready = 1; return 0; }
     mbedtls_ssl_config_init(&g_conf);
     ret = mbedtls_ssl_config_defaults(&g_conf, MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM,
@@ -850,12 +892,30 @@ static void spki_b64(const mbedtls_x509_crt *c, char out[45])
     if (mbedtls_base64_encode((unsigned char *)out, 45, &ol, h, 32) != 0) out[0] = 0;
 }
 
+/* Entropy source (MBEDTLS_NO_PLATFORM_ENTROPY, see tls_config.h). */
+static int getrandom_source(void *ctx, unsigned char *out, size_t len, size_t *olen)
+{
+    (void)ctx;
+    *olen = 0;
+    while (*olen < len) {
+        ssize_t n = getrandom(out + *olen, len - *olen, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
+        }
+        *olen += (size_t)n;
+    }
+    return 0;
+}
+
 static int seed_once(void)
 {
     static int seeded;
     if (seeded) return 0;
     mbedtls_entropy_init(&g_entropy);
     mbedtls_ctr_drbg_init(&g_drbg);
+    if (mbedtls_entropy_add_source(&g_entropy, getrandom_source, NULL, 32, MBEDTLS_ENTROPY_SOURCE_STRONG))
+        return -1;
     const char *pers = "ak_rtsp tls";
     if (mbedtls_ctr_drbg_seed(&g_drbg, mbedtls_entropy_func, &g_entropy, (const unsigned char *)pers, strlen(pers)))
         return -1;

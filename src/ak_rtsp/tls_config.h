@@ -46,6 +46,12 @@
 #define MBEDTLS_CHACHAPOLY_C
 #define MBEDTLS_CTR_DRBG_C
 #define MBEDTLS_ENTROPY_C
+/* mbedTLS only uses getrandom() with glibc; with musl it falls back to
+ * reading /dev/random, which on this 4.4 kernel blocks until enough entropy
+ * is collected (a quiet camera can wait forever: HTTPS stuck "Starting",
+ * seen on a fresh camera with 54 bits available). tls.c adds getrandom()
+ * (flags 0: waits once for the kernel pool, never blocks afterwards). */
+#define MBEDTLS_NO_PLATFORM_ENTROPY
 #define MBEDTLS_ASN1_PARSE_C
 #define MBEDTLS_ASN1_WRITE_C
 #define MBEDTLS_OID_C

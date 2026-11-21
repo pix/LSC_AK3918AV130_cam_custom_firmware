@@ -190,9 +190,17 @@ $(SPEEX_OBJS): CFLAGS += -DHAVE_CONFIG_H -Ithird_party/speexdsp
 
 tls.o: $(MBEDTLS_LIB)
 tls.o: CFLAGS += -DTLS_BUILD_EPOCH=$(shell date +%s)L
+# onvif.c, mqtt.c, web.c... include mbedTLS headers too: fetch it before any
+# object (order-only; parallel builds compiled onvif.o before the fetch)
+$(OBJS): | $(MBEDTLS_DIR)/library/ssl_tls.c
 
 $(TARGET): $(OBJS) $(MBEDTLS_LIB)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# Same program without symbols (~1.1 MB instead of ~5 MB): what goes into the
+# 5 MiB APP partition. Linked stripped, so no strip tool is needed.
+$(TARGET)_stripped: $(OBJS) $(MBEDTLS_LIB)
+	$(CC) $(CFLAGS) -s -o $@ $^ $(LDFLAGS)
 
 %.o: %.S
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -218,7 +226,7 @@ clean:
 # partition — see docs/building_your_own_firmware.md for the full walkthrough
 # and what PATCHED/FW_DIR should point at.
 # -----------------------------------------------------------------------
-firmware: $(TARGET)
+firmware: $(TARGET) $(TARGET)_stripped
 	wsl -d Ubuntu -- bash -c 'cd "$$(wslpath "$(CURDIR)")" && bash build_firmware.sh'
 
 # Upload binary + launch script to camera over FTP.

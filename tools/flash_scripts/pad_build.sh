@@ -21,6 +21,10 @@ OUT="ak_rtsp_firmware_${TS}.squashfs"
 
 SIZE=$(stat -c%s "$SRC")
 PAD=$((TARGET - SIZE))
+if [ "$PAD" -lt 0 ]; then
+    echo "FATAL: $SRC is $SIZE bytes, larger than the $TARGET-byte APP partition." >&2
+    exit 1
+fi
 echo "orig size=$SIZE pad=$PAD target=$TARGET"
 
 head -c "$PAD" /dev/zero | tr '\0' '\377' > pad.bin
