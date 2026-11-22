@@ -60,6 +60,7 @@ int sdn_params_sanitize(sdn_params *p)
         !p->day_check_frame_num || !p->night_check_frame_num ||
         !p->exp_stable_check_frame_num || !p->gain_r || !p->gain_b)
         return -1;                                            /* 0x128ad0..0x128b54 */
+    if (p->exp_stable_check_frame_num > 10000) p->exp_stable_check_frame_num = 10000;   /* int32 maths below (fuzzing) */
     if (p->gain_rb == 0)                     p->gain_rb = 0x400;        /* 0x780 */
     if (p->blk_check_flag > 1)               p->blk_check_flag = 0;     /* 0x786 */
     if (p->low_lumi_th > 0xff)               p->low_lumi_th = 0xc;      /* 0x78c */
@@ -408,6 +409,7 @@ void sdn_reset(sdn_state *st, int fps)
     memset(st, 0, sizeof(*st));
     /* day_mode_check 0x1292a0 / wait_exp_stable 0x128590: idiv(1000, fps) */
     st->frame_ms = fps ? (uint32_t)(1000 / fps) : 100;
+    if (st->frame_ms == 0 || st->frame_ms > 1000) st->frame_ms = 100;   /* fps < 0 or > 1000: no division by 0 later (fuzzing) */
     st->phase = PH_START;
 }
 

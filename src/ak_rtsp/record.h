@@ -27,6 +27,8 @@ int  record_status_json(char *out, size_t cap);
 int  record_list_json(const char *day, char *out, size_t cap);
 /* Validated path of a recording (day + name), or -1. */
 int  record_path(const char *day, const char *name, char *out, size_t cap);
+/* 1 if day is a valid day folder name (YYYY-MM-DD). */
+int  record_day_ok(const char *day);
 int  record_delete(const char *day, const char *name);   /* name NULL/"" = whole day */
 /* Every recording, newest first, as JSON (caller frees). */
 char *record_list_all_json(size_t *len);

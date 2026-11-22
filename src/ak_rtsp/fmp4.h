@@ -21,3 +21,8 @@ int  fmp4_flush(fmp4_t *m);
 /* Flush and free (does not close the FILE). */
 void fmp4_close(fmp4_t *m);
 uint64_t fmp4_video_start_ms(const fmp4_t *m);   /* ts of the first video frame */
+/* Video decode time (90 kHz) of the next fragment: set it before the first
+ * frame to continue an earlier timeline (HLS); read it after fmp4_flush to
+ * get the exact length of what was written. */
+void     fmp4_set_video_time(fmp4_t *m, uint64_t t90);
+uint64_t fmp4_video_time(const fmp4_t *m);

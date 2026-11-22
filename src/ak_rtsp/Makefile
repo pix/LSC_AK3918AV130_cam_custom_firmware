@@ -39,6 +39,9 @@ web_rec_page.c: web/recordings.html gen_web_page.py
 web_term_page.c: web/terminal.html gen_web_page.py
 	python3 -I gen_web_page.py web/terminal.html web_term_page.c web_terminal_html
 
+acme_roots.c: acme_roots.pem gen_web_page.py
+	python3 -I gen_web_page.py acme_roots.pem acme_roots.c acme_roots_pem
+
 # -----------------------------------------------------------------------
 # Build versioning
 #
@@ -82,14 +85,19 @@ SRCS    = main.c \
           qrwifi.c \
           sha1.c \
           live.c \
+          hls.c \
+          cast.c \
           speaker.c \
           osd.c \
           osd_hw.c \
           osd_font.c \
           tls.c \
+          acme.c \
+          acme_roots.c \
           snapshot.c \
           mqtt.c \
           events.c \
+          notify.c \
           sounddet.c \
           tamper.c \
           sdn.c \
@@ -99,9 +107,14 @@ SRCS    = main.c \
           term.c \
           npu.c \
           md.c \
+          md_logic.c \
           fmp4.c \
           record.c \
           onvif.c \
+          onvif_g.c \
+          recidx.c \
+          fmp4r.c \
+          replay.c \
           imgx.c \
           aec.c \
           third_party/speexdsp/mdf.c \

@@ -47,6 +47,12 @@ static const struct { const char *name; int secret; int wifi; } k_files[] = {
     { "ak_rtsp_tls.key", 1, 0 },
     { "ak_rtsp_tls.crt", 0, 0 },
     { "ak_rtsp_tls.san", 0, 0 },
+    { "ak_rtsp_tls_custom.crt", 0, 0 },  /* custom HTTPS certificate (upload / ACME) */
+    { "ak_rtsp_tls_custom.key", 1, 0 },
+    { "ak_rtsp_tls_custom.src", 0, 0 },
+    { "ak_rtsp_acme_account.key", 1, 0 },/* ACME account (settings are acme.*)      */
+    { "ak_rtsp_acme_account", 0, 0 },
+    { "ak_rtsp_acme_ca.crt", 0, 0 },
     { "ak_rtsp_mqtt_ca.crt", 0, 0 },     /* MQTT broker trust and client certificates */
     { "ak_rtsp_mqtt_pin", 0, 0 },
     { "ak_rtsp_mqtt_cam.crt", 0, 0 },

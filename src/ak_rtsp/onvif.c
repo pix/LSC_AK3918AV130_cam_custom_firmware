@@ -1,4 +1,5 @@
 #include "onvif.h"
+#include "onvif_g.h"
 #include "record.h"
 #include "night.h"
 #include "substream.h"
@@ -255,7 +256,7 @@ static sub_t g_subs[MAX_SUBS];
 static unsigned g_next_id = 1;
 static pthread_mutex_t g_ev_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_ev_cond = PTHREAD_COND_INITIALIZER;
-static int g_motion, g_sound, g_tamper;
+static int g_motion, g_sound, g_tamper, g_inside = -1;   /* -1: no loitering rule seen yet (no entity) */
 
 static void sub_push_ex(sub_t *s, const char *topic, const char *item, int value, int init, int now, int src)
 {
@@ -277,6 +278,7 @@ static void push_state(sub_t *s, int init)
     sub_push(s, "tns1:VideoSource/MotionAlarm", "State", g_motion, init);
     sub_push(s, "tns1:AudioAnalytics/Audio/DetectedSound", "IsSoundDetected", g_sound, init);
     sub_push(s, "tns1:VideoSource/GlobalSceneChange/ImagingService", "State", g_tamper, init);
+    if (g_inside >= 0) sub_push(s, "tns1:RuleEngine/FieldDetector/ObjectsInside", "IsInside", g_inside, init);
     onvif_sys_push(s, init);
 }
 
@@ -285,6 +287,7 @@ void onvif_event(const char *kind, int on)
     pthread_mutex_lock(&g_ev_lock);
     time_t now = time(NULL);
     if (!strcmp(kind, "motion")) g_motion = on; else if (!strcmp(kind, "sound")) g_sound = on; else if (!strcmp(kind, "tamper")) g_tamper = on;
+    else if (!strcmp(kind, "loiter")) g_inside = on;
     for (int i = 0; i < MAX_SUBS; i++) {
         sub_t *s = &g_subs[i];
         if (!s->used) continue;
@@ -296,6 +299,10 @@ void onvif_event(const char *kind, int on)
             sub_push(s, "tns1:VideoSource/GlobalSceneChange/ImagingService", "State", on, 0);
             sub_push(s, "tns1:RuleEngine/CellMotionDetector/Tamper", "IsTamperDetected", on, 0);
             sub_push(s, "tns1:RuleEngine/TamperDetector/Tamper", "IsTamperDetected", on, 0);
+        } else if (!strcmp(kind, "line")) {            /* on = object (track) id; an event, not a state */
+            sub_push(s, "tns1:RuleEngine/LineDetector/Crossed", "ObjectId", on, 0);
+        } else if (!strcmp(kind, "loiter")) {
+            sub_push(s, "tns1:RuleEngine/FieldDetector/ObjectsInside", "IsInside", on, 0);
         } else {
             sub_push(s, "tns1:AudioAnalytics/Audio/DetectedSound", "IsSoundDetected", on, 0);
         }
@@ -388,12 +395,16 @@ static long dur_seconds(const char *iso, long def)
     /* PT60S, PT1M, PT1H, PT10M30S ... */
     const char *p = strstr(iso, "PT");
     if (!p) return def;
+    /* capped: a long digit string from the client must not overflow (signed
+     * overflow is UB; found by fuzzing). Callers clamp to minutes anyway. */
     long total = 0, v = 0;
+    const long cap = 100000000L;                       /* > 3 years in seconds, fits 32-bit long */
     for (p += 2; *p; p++) {
-        if (isdigit((unsigned char)*p)) v = v * 10 + (*p - '0');
-        else if (*p == 'H') { total += v * 3600; v = 0; }
-        else if (*p == 'M') { total += v * 60; v = 0; }
-        else if (*p == 'S' || *p == '.') { total += v; v = 0; if (*p == '.') break; }
+        if (isdigit((unsigned char)*p)) { if (v < cap) v = v * 10 + (*p - '0'); }
+        else if (*p == 'H') { total += v < cap / 3600 ? v * 3600 : cap; v = 0; }
+        else if (*p == 'M') { total += v < cap / 60 ? v * 60 : cap; v = 0; }
+        else if (*p == 'S' || *p == '.') { total += v < cap ? v : cap; v = 0; if (*p == '.') break; }
+        if (total > cap) total = cap;
     }
     return total > 0 ? total : def;
 }
@@ -411,7 +422,8 @@ static int render_messages(sub_t *s, char *out, size_t cap, int limit)
         else if (m->src == 1)
             snprintf(vs, sizeof vs, "<tt:SimpleItem Name=\"VideoSourceConfigurationToken\" Value=\"vsc\"/>"
                                     "<tt:SimpleItem Name=\"VideoAnalyticsConfigurationToken\" Value=\"vac\"/>"
-                                    "<tt:SimpleItem Name=\"Rule\" Value=\"MotionRule\"/>");
+                                    "<tt:SimpleItem Name=\"Rule\" Value=\"%s\"/>", strstr(m->topic, "LineDetector") ? "LineRule" :
+                                    strstr(m->topic, "FieldDetector") ? "FieldRule" : "MotionRule");
         const char *src = vs[0] ? vs : "<tt:SimpleItem Name=\"Source\" Value=\"vs\"/><tt:SimpleItem Name=\"VideoSourceConfigurationToken\" Value=\"vsc\"/>";
         char val[40];
         if (!strcmp(m->item, "UtcTime")) {                               /* xsd:dateTime */
@@ -420,8 +432,8 @@ static int render_messages(sub_t *s, char *out, size_t cap, int limit)
                 iso_time(s_last_sync, val);
             else iso_time(m->now ? time(NULL) : m->t, val);
         }
-        else if (!strcmp(m->item, "Value"))
-            snprintf(val, sizeof val, "%d", m->value);                    /* numbers (tenths/percent) */
+        else if (!strcmp(m->item, "Value") || !strcmp(m->item, "ObjectId"))
+            snprintf(val, sizeof val, "%d", m->value);                    /* numbers (tenths/percent, object id) */
         else if (!strcmp(m->item, "State"))
             snprintf(val, sizeof val, "%s", m->value ? "Active" : "Idle");
         else
@@ -553,6 +565,18 @@ int onvif_handle(conn_t *cn, const char *path, const char *body, const char *hos
     snprintf(base, sizeof base, "http://%s", h);
     char now[32];
     iso_time(time(NULL), now);
+    {   /* Profile G: search, recording (read-only) and replay services (onvif_g.c) */
+        char *gb = NULL;
+        int gcode = 200;
+        if (onvif_g_handle(path, action, body, base, h, &gb, &gcode)) {
+            if (gb) send_soap(cn, gcode, gb); else fault(cn, "Action", "out of memory");
+            free(gb);
+            return 0;
+        }
+    }
+    char g_ext[1024];                   /* Profile G entries for GetCapabilities / GetServices ("" when off) */
+    if (!strcmp(action, "GetServices")) onvif_g_services(base, g_ext, sizeof g_ext);
+    else onvif_g_caps(base, g_ext, sizeof g_ext);
 
     /* ---- device ---- */
     if (!strcmp(action, "GetSystemDateAndTime")) {
@@ -585,14 +609,14 @@ int onvif_handle(conn_t *cn, const char *path, const char *body, const char *hos
                  "<tt:Imaging><tt:XAddr>%s/onvif/imaging_service</tt:XAddr></tt:Imaging>"
                  "<tt:Media><tt:XAddr>%s/onvif/media_service</tt:XAddr><tt:StreamingCapabilities><tt:RTPMulticast>false</tt:RTPMulticast>"
                  "<tt:RTP_TCP>true</tt:RTP_TCP><tt:RTP_RTSP_TCP>true</tt:RTP_RTSP_TCP></tt:StreamingCapabilities></tt:Media>"
-                 "</tds:Capabilities></tds:GetCapabilitiesResponse>", base, base, base, base);
+                 "%s</tds:Capabilities></tds:GetCapabilitiesResponse>", base, base, base, base, g_ext);
     } else if (!strcmp(action, "GetServices")) {
         snprintf(b, sizeof b, "<tds:GetServicesResponse>"
                  "<tds:Service><tds:Namespace>http://www.onvif.org/ver10/device/wsdl</tds:Namespace><tds:XAddr>%s/onvif/device_service</tds:XAddr><tds:Version><tt:Major>2</tt:Major><tt:Minor>40</tt:Minor></tds:Version></tds:Service>"
                  "<tds:Service><tds:Namespace>http://www.onvif.org/ver10/media/wsdl</tds:Namespace><tds:XAddr>%s/onvif/media_service</tds:XAddr><tds:Version><tt:Major>2</tt:Major><tt:Minor>40</tt:Minor></tds:Version></tds:Service>"
                  "<tds:Service><tds:Namespace>http://www.onvif.org/ver10/events/wsdl</tds:Namespace><tds:XAddr>%s/onvif/events_service</tds:XAddr><tds:Version><tt:Major>2</tt:Major><tt:Minor>40</tt:Minor></tds:Version></tds:Service>"
                  "<tds:Service><tds:Namespace>http://www.onvif.org/ver20/imaging/wsdl</tds:Namespace><tds:XAddr>%s/onvif/imaging_service</tds:XAddr><tds:Version><tt:Major>2</tt:Major><tt:Minor>0</tt:Minor></tds:Version></tds:Service>"
-                 "</tds:GetServicesResponse>", base, base, base, base);
+                 "%s</tds:GetServicesResponse>", base, base, base, base, g_ext);
     } else if (!strcmp(action, "GetServiceCapabilities")) {
         if (strstr(path, "events"))
             snprintf(b, sizeof b, "<tev:GetServiceCapabilitiesResponse><tev:Capabilities WSSubscriptionPolicySupport=\"false\" WSPullPointSupport=\"true\" "
@@ -614,7 +638,8 @@ int onvif_handle(conn_t *cn, const char *path, const char *body, const char *hos
                  "<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/Profile/Streaming</tt:ScopeItem></tds:Scopes>"
                  "<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/hardware/AK3918</tt:ScopeItem></tds:Scopes>"
                  "<tds:Scopes><tt:ScopeDef>Configurable</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/name/%s</tt:ScopeItem></tds:Scopes>"
-                 "</tds:GetScopesResponse>", sys_device_name_cn());
+                 "%s</tds:GetScopesResponse>", sys_device_name_cn(),
+                 onvif_g_enabled() ? "<tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/Profile/G</tt:ScopeItem></tds:Scopes>" : "");
     } else if (!strcmp(action, "GetHostname")) {
         snprintf(b, sizeof b, "<tds:GetHostnameResponse><tds:HostnameInformation><tt:FromDHCP>false</tt:FromDHCP><tt:Name>%s</tt:Name></tds:HostnameInformation></tds:GetHostnameResponse>", sys_device_name_cn());
     } else if (!strcmp(action, "GetNetworkInterfaces")) {
@@ -734,7 +759,15 @@ int onvif_handle(conn_t *cn, const char *path, const char *body, const char *hos
                  "<tns1:RuleEngine><CellMotionDetector><Motion wstop:topic=\"true\"><tt:MessageDescription IsProperty=\"true\"><tt:Source>"
                  "<tt:SimpleItemDescription Name=\"VideoSourceConfigurationToken\" Type=\"tt:ReferenceToken\"/><tt:SimpleItemDescription Name=\"VideoAnalyticsConfigurationToken\" Type=\"tt:ReferenceToken\"/>"
                  "<tt:SimpleItemDescription Name=\"Rule\" Type=\"xsd:string\"/></tt:Source><tt:Data><tt:SimpleItemDescription Name=\"IsMotion\" Type=\"xsd:boolean\"/></tt:Data>"
-                 "</tt:MessageDescription></Motion></CellMotionDetector></tns1:RuleEngine>"
+                 "</tt:MessageDescription></Motion></CellMotionDetector>"
+                 "<LineDetector><Crossed wstop:topic=\"true\"><tt:MessageDescription><tt:Source>"
+                 "<tt:SimpleItemDescription Name=\"VideoSourceConfigurationToken\" Type=\"tt:ReferenceToken\"/><tt:SimpleItemDescription Name=\"VideoAnalyticsConfigurationToken\" Type=\"tt:ReferenceToken\"/>"
+                 "<tt:SimpleItemDescription Name=\"Rule\" Type=\"xsd:string\"/></tt:Source><tt:Data><tt:SimpleItemDescription Name=\"ObjectId\" Type=\"xsd:integer\"/></tt:Data>"
+                 "</tt:MessageDescription></Crossed></LineDetector>"
+                 "<FieldDetector><ObjectsInside wstop:topic=\"true\"><tt:MessageDescription IsProperty=\"true\"><tt:Source>"
+                 "<tt:SimpleItemDescription Name=\"VideoSourceConfigurationToken\" Type=\"tt:ReferenceToken\"/><tt:SimpleItemDescription Name=\"VideoAnalyticsConfigurationToken\" Type=\"tt:ReferenceToken\"/>"
+                 "<tt:SimpleItemDescription Name=\"Rule\" Type=\"xsd:string\"/></tt:Source><tt:Data><tt:SimpleItemDescription Name=\"IsInside\" Type=\"xsd:boolean\"/></tt:Data>"
+                 "</tt:MessageDescription></ObjectsInside></FieldDetector></tns1:RuleEngine>"
                  "<tns1:VideoSource><MotionAlarm wstop:topic=\"true\"><tt:MessageDescription IsProperty=\"true\"><tt:Source><tt:SimpleItemDescription Name=\"Source\" Type=\"tt:ReferenceToken\"/></tt:Source>"
                  "<tt:Data><tt:SimpleItemDescription Name=\"State\" Type=\"xsd:boolean\"/></tt:Data></tt:MessageDescription></MotionAlarm>"
                  "<GlobalSceneChange><ImagingService wstop:topic=\"true\"><tt:MessageDescription IsProperty=\"true\"><tt:Source><tt:SimpleItemDescription Name=\"Source\" Type=\"tt:ReferenceToken\"/></tt:Source>"
@@ -862,11 +895,11 @@ static void discovery_msg(char *out, size_t cap, const char *action, const char 
         "<d:AppSequence InstanceId=\"1\" MessageNumber=\"1\"/></env:Header><env:Body>%s"
         "<d:%s><wsa:EndpointReference><wsa:Address>%s</wsa:Address></wsa:EndpointReference>"
         "<d:Types>dn:NetworkVideoTransmitter tds:Device</d:Types>"
-        "<d:Scopes>onvif://www.onvif.org/type/video_encoder onvif://www.onvif.org/Profile/Streaming onvif://www.onvif.org/hardware/AK3918 onvif://www.onvif.org/name/%s</d:Scopes>"
+        "<d:Scopes>onvif://www.onvif.org/type/video_encoder onvif://www.onvif.org/Profile/Streaming onvif://www.onvif.org/hardware/AK3918 onvif://www.onvif.org/name/%s%s</d:Scopes>"
         "<d:XAddrs>http://%s/onvif/device_service</d:XAddrs><d:MetadataVersion>1</d:MetadataVersion></d:%s>%s</env:Body></env:Envelope>",
         msgid, relates ? "<wsa:RelatesTo>" : "", relates ? relates : "", relates ? "</wsa:RelatesTo>" : "",
         match ? "http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous" : "urn:schemas-xmlsoap-org:ws:2005:04:discovery",
-        action, match ? "<d:ProbeMatches>" : "", match ? "ProbeMatch" : "Hello", uuid, sys_device_name_cn(), ip,
+        action, match ? "<d:ProbeMatches>" : "", match ? "ProbeMatch" : "Hello", uuid, sys_device_name_cn(), onvif_g_scope(), ip,
         match ? "ProbeMatch" : "Hello", match ? "</d:ProbeMatches>" : "");
 }
 
@@ -956,7 +989,7 @@ static void *discovery_thread(void *arg)
     return NULL;
 }
 
-void onvif_init(void) { CTRL_REG("onvif.enabled", p_en, CTRL_PERSIST); }
+void onvif_init(void) { CTRL_REG("onvif.enabled", p_en, CTRL_PERSIST); onvif_g_init(); }
 
 void onvif_start(void)
 {

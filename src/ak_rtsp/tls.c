@@ -41,6 +41,17 @@
 #define F_CRT     TLS_DIR "/ak_rtsp_tls.crt"
 #define F_STAMP   TLS_DIR "/ak_rtsp_tls.san"    /* what the server cert was issued for */
 #define F_CONF    TLS_DIR "/ak_rtsp_tls.conf"
+/* Custom server certificate (uploaded, or issued by ACME): served to
+ * clients whose SNI matches one of its names; everything else (addresses,
+ * other names, no SNI) keeps the camera-CA certificate, so a wrong upload
+ * can never lock the user out of the page. */
+#define F_CUS_CRT TLS_DIR "/ak_rtsp_tls_custom.crt"     /* chain, server certificate first */
+#define F_CUS_KEY TLS_DIR "/ak_rtsp_tls_custom.key"
+#define F_CUS_SRC TLS_DIR "/ak_rtsp_tls_custom.src"     /* "upload" or "acme" */
+#define F_ACME_CA TLS_DIR "/ak_rtsp_acme_ca.crt"        /* extra trusted CA for ACME / DNS APIs */
+extern const char acme_roots_pem[];                     /* acme_roots.pem, generated acme_roots.c */
+#define CUS_NAMES_MAX 16
+#define CUS_MAX_UPLOAD 32768
 
 #define DAY 86400L
 #define SRV_DAYS   800      /* Apple: certs from user-installed CAs <= 825 days */
@@ -51,8 +62,10 @@
 typedef struct pair {          /* server certificate + key in use */
     mbedtls_x509_crt crt;
     mbedtls_pk_context key;
-    struct pair *prev;         /* superseded pairs are kept (rare, small): a
-                                  handshake in progress may still use them */
+    struct pair *prev;         /* camera pairs: superseded ones are kept (rare, small):
+                                  a handshake in progress may still use them.
+                                  custom pairs: link of the retired list */
+    int refs;                  /* custom pairs: handshakes using it (g_cur_lock) */
 } pair_t;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;   /* config + issuing */
@@ -69,9 +82,49 @@ static int g_nnames;
 static char g_ips[160];          /* comma separated, as in the current cert */
 static char g_not_after[16];
 static char g_err[96];
+/* custom certificate (g_cur_lock): NULL = none. A replaced or removed pair
+ * goes to the retired list g_cus_old and is freed once no handshake holds it
+ * (refs, taken in cert_cb, dropped in tls_accept when the handshake ends).
+ * Uploads can be frequent (deploy hooks): keeping them all grew memory by
+ * ~40 KB each (parsed chain + the key's precomputed EC tables). */
+static pair_t *g_cus, *g_cus_old;
+
+static void pair_free(pair_t *p)
+{
+    mbedtls_x509_crt_free(&p->crt);
+    mbedtls_pk_free(&p->key);
+    free(p);
+}
+/* Caller holds g_cur_lock. */
+static void cus_retire(pair_t *p)
+{
+    if (!p) return;
+    p->prev = g_cus_old;
+    g_cus_old = p;
+}
+static int cus_reap(void)                 /* frees idle retired pairs; returns how many remain */
+{
+    int left = 0;
+    for (pair_t **pp = &g_cus_old; *pp; ) {
+        pair_t *p = *pp;
+        if (p->refs > 0) { left++; pp = &p->prev; continue; }
+        *pp = p->prev;
+        pair_free(p);
+    }
+    return left;
+}
+static char g_cus_names[CUS_NAMES_MAX][254];
+static int g_cus_n;
+static time_t g_cus_nb, g_cus_na;
+static char g_cus_until[16], g_cus_issuer[160], g_cus_src[8], g_cus_err[120];
+#define CUS_IPS_MAX 8
+static uint32_t g_cus_ips[CUS_IPS_MAX];      /* IPv4 subjectAltNames, network order */
+static int g_cus_nip;
+static int g_cus_all;                         /* tls conf custom_all=1: custom certificate for every connection */
 
 int tls_ready(void) { return g_ready; }
 static int seed_once(void);
+static int custom_load(void);
 
 /* MBEDTLS_PLATFORM_MS_TIME_ALT: see tls_config.h */
 mbedtls_ms_time_t mbedtls_ms_time(void) { return (mbedtls_ms_time_t)mono_ms(); }
@@ -185,6 +238,9 @@ static int dns_name_ok(const char *s)
 static int parse_names(const char *in, char names[TLS_NAMES_MAX][254], int *count)
 {
     char buf[1100];
+    /* callers copy the whole array: unused slots must be empty, not stack
+     * garbage (it reached the host check and the CA's name constraints) */
+    memset(names, 0, TLS_NAMES_MAX * sizeof names[0]);
     snprintf(buf, sizeof buf, "%s", in);
     if (strlen(in) >= sizeof buf) return -1;
     int n = 0;
@@ -207,6 +263,7 @@ static void load_conf(void)
     char buf[1400];
     g_nnames = 0;
     g_redirect = 0;
+    g_cus_all = 0;
     if (read_file(F_CONF, buf, sizeof buf) < 0) return;
     char *save = NULL;
     for (char *l = strtok_r(buf, "\n", &save); l; l = strtok_r(NULL, "\n", &save)) {
@@ -216,6 +273,8 @@ static void load_conf(void)
             if (parse_names(l + 6, tmp, &n) == 0) { memcpy(g_names, tmp, sizeof tmp); g_nnames = n; }
         } else if (!strncmp(l, "redirect=", 9)) {
             g_redirect = l[9] == '1';
+        } else if (!strncmp(l, "custom_all=", 11)) {
+            g_cus_all = l[11] == '1';
         }
     }
 }
@@ -575,13 +634,71 @@ static int ensure_server_cert(int force)
 }
 
 /* ---- TLS plumbing ----------------------------------------------------------------- */
+/* Certificate name (possibly "*.example.org", one label) against a host
+ * name of hl bytes, case-insensitive. */
+static int name_match(const char *pat, const char *host, size_t hl)
+{
+    if (hl && host[hl - 1] == '.') hl--;
+    if (pat[0] == '*' && pat[1] == '.') {
+        const char *dot = memchr(host, '.', hl);
+        if (!dot || dot == host) return 0;
+        size_t rest = hl - (size_t)(dot - host) - 1;
+        return strlen(pat + 2) == rest && !strncasecmp(pat + 2, dot + 1, rest);
+    }
+    return strlen(pat) == hl && !strncasecmp(pat, host, hl);
+}
+
+/* Custom certificate for this connection, if it is in its validity period
+ * (or the clock is not set yet): always with g_cus_all, else when the SNI
+ * matches one of its names, or (no SNI: the client used an address) when
+ * the address the client connected to is one of its IP addresses.
+ * local: that address (network order), 0 = unknown. Caller holds g_cur_lock. */
+static pair_t *custom_for(const char *host, size_t hl, uint32_t local)
+{
+    if (!g_cus) return NULL;
+    int trusted;
+    time_t now = now_or_build(&trusted);
+    if (trusted && (now < g_cus_nb || now >= g_cus_na)) return NULL;
+    if (g_cus_all) return g_cus;
+    if (host && hl && hl <= 253) {
+        for (int k = 0; k < g_cus_n; k++)
+            if (name_match(g_cus_names[k], host, hl)) return g_cus;
+        return NULL;
+    }
+    for (int k = 0; local && k < g_cus_nip; k++)
+        if (g_cus_ips[k] == local) return g_cus;
+    return NULL;
+}
+
 static int cert_cb(mbedtls_ssl_context *ssl)
 {
+    size_t sl = 0;
+    const unsigned char *sni = mbedtls_ssl_get_hs_sni(ssl, &sl);
+    uint32_t local = 0;
+    const conn_t *c = ssl->MBEDTLS_PRIVATE(p_bio);           /* set by tls_accept */
+    struct sockaddr_in la;
+    socklen_t ll = sizeof la;
+    if (c && getsockname(c->fd, (struct sockaddr *)&la, &ll) == 0 && la.sin_family == AF_INET) local = la.sin_addr.s_addr;
     pthread_mutex_lock(&g_cur_lock);
-    pair_t *p = g_cur;
+    pair_t *held = mbedtls_ssl_get_user_data_p(ssl);       /* called once per handshake; be safe anyway */
+    if (held) { held->refs--; mbedtls_ssl_set_user_data_p(ssl, NULL); }
+    pair_t *p = custom_for((const char *)sni, sni ? sl : 0, local);
+    if (p) { p->refs++; mbedtls_ssl_set_user_data_p(ssl, p); }   /* released in tls_accept */
+    else p = g_cur;
     pthread_mutex_unlock(&g_cur_lock);
     if (!p) return MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
     return mbedtls_ssl_set_hs_own_cert(ssl, &p->crt, &p->key);
+}
+
+/* The handshake is over (either way): the custom pair it used may be freed
+ * once retired. mbedTLS keeps no reference to our certificate or key after
+ * the handshake (renegotiation is not compiled in). */
+static void cert_release(mbedtls_ssl_context *ssl)
+{
+    pthread_mutex_lock(&g_cur_lock);
+    pair_t *held = mbedtls_ssl_get_user_data_p(ssl);
+    if (held) { held->refs--; mbedtls_ssl_set_user_data_p(ssl, NULL); cus_reap(); }
+    pthread_mutex_unlock(&g_cur_lock);
 }
 
 static int bio_send(void *ctx, const unsigned char *buf, size_t len)
@@ -621,6 +738,7 @@ int tls_init(void)
         pthread_mutex_unlock(&g_lock);
         return -1;
     }
+    if (!g_cus && access(F_CUS_CRT, F_OK) == 0) custom_load();   /* problems are shown, never fatal */
     pthread_mutex_unlock(&g_lock);
 
     g_err[0] = 0;                               /* an earlier attempt's error (e.g. "no IP address yet") is over */
@@ -676,6 +794,7 @@ conn_t *tls_accept(int fd, int handshake_ms)
         while ((ret = mbedtls_ssl_handshake(ssl)) == MBEDTLS_ERR_SSL_WANT_READ ||
                ret == MBEDTLS_ERR_SSL_WANT_WRITE) {}
     }
+    cert_release(ssl);                          /* nothing below uses our certificate or key */
     if (ret) {
         /* Browsers that don't trust the CA yet abort here: normal, log a few. */
         if (logged < 5) {
@@ -691,7 +810,7 @@ conn_t *tls_accept(int fd, int handshake_ms)
     return c;
 }
 
-int tls_set_config(const char *names, int redirect, const char **err)
+int tls_set_config(const char *names, int redirect, int custom_all, const char **err)
 {
     char tmp[TLS_NAMES_MAX][254];
     int n = 0;
@@ -700,11 +819,17 @@ int tls_set_config(const char *names, int redirect, const char **err)
         return -1;
     }
     pthread_mutex_lock(&g_lock);
+    if (!g_ready) load_conf();      /* before tls_init (SD reset flag at boot): keep the saved names */
     if (names) { memcpy(g_names, tmp, sizeof tmp); g_nnames = n; }
     if (redirect >= 0) g_redirect = redirect;
+    if (custom_all >= 0) {
+        pthread_mutex_lock(&g_cur_lock);
+        g_cus_all = custom_all;
+        pthread_mutex_unlock(&g_cur_lock);
+    }
     char csv[1100], buf[1300];
     names_csv(g_names, g_nnames, csv, sizeof csv);
-    snprintf(buf, sizeof buf, "names=%s\nredirect=%d\n", csv, g_redirect);
+    snprintf(buf, sizeof buf, "names=%s\nredirect=%d\ncustom_all=%d\n", csv, g_redirect, g_cus_all);
     int ret = write_file(F_CONF, buf, strlen(buf), 0644);
     if (!ret && g_ready) ret = ensure_server_cert(0);
     pthread_mutex_unlock(&g_lock);
@@ -740,7 +865,7 @@ static void cert_pins(const char *path, char fp[65], char spki[45])
     mbedtls_x509_crt_init(&c);
     fp[0] = spki[0] = 0;
     if (load_crt(&c, path) == 0) {
-        unsigned char h[32], der[200];
+        unsigned char h[32], der[600];               /* RSA-4096 public keys (custom certificates) */
         mbedtls_sha256(c.raw.p, c.raw.len, h, 0);
         for (int i = 0; i < 32; i++) sprintf(fp + 2 * i, "%02x", h[i]);
         int n = mbedtls_pk_write_pubkey_der(&c.pk, der, sizeof der);   /* written at the end */
@@ -756,7 +881,36 @@ static void cert_pins(const char *path, char fp[65], char spki[45])
 int tls_info_json(char *out, size_t cap)
 {
     char fp[65] = "", names[1100] = "", subj[160] = "", ca_spki[45], srv_fp[65], srv_spki[45];
+    char cus[2400] = "null", cus_fp[65], cus_spki[45];
     pthread_mutex_lock(&g_lock);
+    cert_pins(F_CUS_CRT, cus_fp, cus_spki);           /* file I/O outside g_cur_lock (handshakes) */
+    pthread_mutex_lock(&g_cur_lock);
+    if (g_cus || g_cus_err[0]) {
+        char cn[CUS_NAMES_MAX * 256 + 1];
+        size_t o = 0;
+        cn[0] = 0;
+        for (int k = 0; k < g_cus_n && o < sizeof cn; k++)
+            o += (size_t)snprintf(cn + o, sizeof cn - o, "%s%s", k ? "," : "", g_cus_names[k]);
+        int trusted;
+        time_t now = now_or_build(&trusted);
+        int active = g_cus && (!trusted || (now >= g_cus_nb && now < g_cus_na));
+        if (!g_cus) cus_fp[0] = cus_spki[0] = 0;
+        char ips[CUS_IPS_MAX * 16 + 1] = "";
+        o = 0;
+        for (int k = 0; k < g_cus_nip; k++) {
+            char a[16];
+            inet_ntop(AF_INET, &g_cus_ips[k], a, sizeof a);
+            o += (size_t)snprintf(ips + o, sizeof ips - o, "%s%s", k ? "," : "", a);
+        }
+        /* names are validated DNS names; issuer/error are sanitized when stored */
+        snprintf(cus, sizeof cus,
+                 "{\"present\":%s,\"active\":%s,\"names\":\"%.1800s\",\"ips\":\"%s\",\"until\":\"%s\",\"issuer\":\"%s\","
+                 "\"source\":\"%s\",\"sha256\":\"%s\",\"spki\":\"%s\",\"error\":\"%s\"}",
+                 g_cus ? "true" : "false", active ? "true" : "false", cn, ips, g_cus_until, g_cus_issuer,
+                 g_cus_src, cus_fp, cus_spki, g_cus_err);
+    }
+    int all = g_cus_all;
+    pthread_mutex_unlock(&g_cur_lock);
     cert_pins(F_CA_CRT, fp, ca_spki);
     cert_pins(F_CRT, srv_fp, srv_spki);
     names_csv(g_names, g_nnames, names, sizeof names);
@@ -771,9 +925,9 @@ int tls_info_json(char *out, size_t cap)
     int n = snprintf(out, cap,
         "{\"ready\":%s,\"port\":443,\"redirect\":%s,\"names\":\"%s\",\"ips\":\"%s\","
         "\"not_after\":\"%s\",\"ca_name\":\"%s\",\"ca_sha256\":\"%s\",\"ca_spki\":\"%s\","
-        "\"srv_sha256\":\"%s\",\"srv_spki\":\"%s\",\"rtsps_port\":322,\"error\":\"%s\"}",
+        "\"srv_sha256\":\"%s\",\"srv_spki\":\"%s\",\"rtsps_port\":322,\"error\":\"%s\",\"custom_all\":%s,\"custom\":%s}",
         g_ready ? "true" : "false", g_redirect ? "true" : "false", names, g_ips,
-        g_not_after, subj, fp, ca_spki, srv_fp, srv_spki, g_err);
+        g_not_after, subj, fp, ca_spki, srv_fp, srv_spki, g_err, all ? "true" : "false", cus);
     pthread_mutex_unlock(&g_lock);
     return n;
 }
@@ -1001,6 +1155,7 @@ conn_t *tls_client_connect(int fd, const char *host, int verify, int client_cert
                            int timeout_ms, char *err, size_t errcap)
 {
     char e[100];
+    const char *who = verify == 3 ? "server" : "broker";
     err[0] = 0;
     pthread_mutex_lock(&g_lock);
     int sret = seed_once();
@@ -1029,6 +1184,13 @@ conn_t *tls_client_connect(int fd, const char *host, int verify, int client_cert
         if (load_crt(&k->ca, F_MQ_CA) != 0) { snprintf(err, errcap, "no broker CA certificate (upload or fetch it, or pin the broker key)"); goto fail; }
         mbedtls_ssl_conf_ca_chain(&k->conf, &k->ca, NULL);
         mbedtls_ssl_conf_authmode(&k->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    } else if (!ret && verify == 3) {
+        /* public servers (ACME, DNS APIs): built-in roots + the optional extra CA */
+        int bad = mbedtls_x509_crt_parse(&k->ca, (const unsigned char *)acme_roots_pem, strlen(acme_roots_pem) + 1);
+        if (access(F_ACME_CA, F_OK) == 0 && load_crt(&k->ca, F_ACME_CA) < 0) { snprintf(err, errcap, "the extra CA certificate is unreadable"); goto fail; }
+        if (bad < 0 && !k->ca.raw.len) { snprintf(err, errcap, "no trusted CA certificates"); goto fail; }
+        mbedtls_ssl_conf_ca_chain(&k->conf, &k->ca, NULL);
+        mbedtls_ssl_conf_authmode(&k->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     } else if (!ret && verify == 2) {
         if (read_file(F_MQ_PIN, pin, sizeof pin) <= 0) { snprintf(err, errcap, "no pinned broker key (fetch it from the broker first)"); goto fail; }
         pin[strcspn(pin, "\r\n")] = 0;
@@ -1053,15 +1215,15 @@ conn_t *tls_client_connect(int fd, const char *host, int verify, int client_cert
     if (ret) {
         uint32_t flags = mbedtls_ssl_get_verify_result(ssl);
         if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED && flags) {
-            if (flags & MBEDTLS_X509_BADCERT_CN_MISMATCH) snprintf(err, errcap, "broker certificate is not valid for %s", host);
-            else if (flags & MBEDTLS_X509_BADCERT_NOT_TRUSTED) snprintf(err, errcap, "broker certificate is not signed by the uploaded CA");
-            else if (flags & MBEDTLS_X509_BADCERT_EXPIRED) snprintf(err, errcap, "broker certificate has expired");
-            else if (flags & MBEDTLS_X509_BADCERT_FUTURE) snprintf(err, errcap, "broker certificate is not valid yet (camera clock?)");
+            if (flags & MBEDTLS_X509_BADCERT_CN_MISMATCH) snprintf(err, errcap, "%s certificate is not valid for %s", who, host);
+            else if (flags & MBEDTLS_X509_BADCERT_NOT_TRUSTED) snprintf(err, errcap, "%s certificate is not signed by %s", who, verify == 3 ? "a trusted CA" : "the uploaded CA");
+            else if (flags & MBEDTLS_X509_BADCERT_EXPIRED) snprintf(err, errcap, "%s certificate has expired", who);
+            else if (flags & MBEDTLS_X509_BADCERT_FUTURE) snprintf(err, errcap, "%s certificate is not valid yet (camera clock?)", who);
             else {
                 char vi[160];
                 mbedtls_x509_crt_verify_info(vi, sizeof vi, "", flags);
                 vi[strcspn(vi, "\n")] = 0;
-                snprintf(err, errcap, "broker certificate rejected: %s", vi);
+                snprintf(err, errcap, "%s certificate rejected: %s", who, vi);
             }
             goto fail;
         }
@@ -1310,7 +1472,312 @@ int tls_mqtt_trust(const char *what, const char *expect, const char **err)
 /* 1 if host is one of the configured certificate DNS names */
 int tls_name_ok(const char *host)
 {
-    for (int k = 0; k < TLS_NAMES_MAX; k++)
+    /* only the configured count: slots past it were stale or uninitialised
+     * (found by valgrind; a removed name could stay accepted) */
+    for (int k = 0; k < g_nnames && k < TLS_NAMES_MAX; k++)
         if (g_names[k][0] && !strcasecmp(g_names[k], host)) return 1;
+    pthread_mutex_lock(&g_cur_lock);                 /* names of the custom certificate too */
+    int ok = 0;
+    for (int k = 0; k < g_cus_n && !ok; k++) ok = name_match(g_cus_names[k], host, strlen(host));
+    pthread_mutex_unlock(&g_cur_lock);
+    return ok;
+}
+
+/* =========================================================================
+ * Custom server certificate (upload or ACME)
+ * ========================================================================= */
+static time_t x509_epoch(const mbedtls_x509_time *t)
+{
+    struct tm tm;
+    memset(&tm, 0, sizeof tm);
+    tm.tm_year = t->year - 1900; tm.tm_mon = t->mon - 1; tm.tm_mday = t->day;
+    tm.tm_hour = t->hour; tm.tm_min = t->min; tm.tm_sec = t->sec;
+    return timegm(&tm);
+}
+
+static void sanitize(char *s)            /* text from certificates / servers, for JSON */
+{
+    for (; *s; s++) if (*s == '"' || *s == '\\' || (unsigned char)*s < 0x20 || (unsigned char)*s >= 0x7f) *s = '\'';
+}
+
+static int pattern_ok(const char *n)     /* DNS name, or *.name */
+{
+    return (n[0] == '*' && n[1] == '.') ? dns_name_ok(n + 2) : dns_name_ok(n);
+}
+
+/* DNS names (lower case) and IPv4 addresses of the certificate (subjectAltName). */
+static int crt_dns_names(const mbedtls_x509_crt *c, char names[CUS_NAMES_MAX][254], uint32_t ips[CUS_IPS_MAX], int *nip)
+{
+    int n = 0;
+    *nip = 0;
+    for (const mbedtls_x509_sequence *s = &c->subject_alt_names; s && s->buf.p; s = s->next) {
+        mbedtls_x509_subject_alternative_name san;
+        memset(&san, 0, sizeof san);
+        if (mbedtls_x509_parse_subject_alt_name(&s->buf, &san) != 0) continue;
+        if (san.type == MBEDTLS_X509_SAN_IP_ADDRESS && san.san.unstructured_name.len == 4 && *nip < CUS_IPS_MAX) {
+            memcpy(&ips[*nip], san.san.unstructured_name.p, 4);
+            (*nip)++;
+        } else if (san.type == MBEDTLS_X509_SAN_DNS_NAME && n < CUS_NAMES_MAX) {
+            size_t l = san.san.unstructured_name.len;
+            if (l > 0 && l < 254) {
+                memcpy(names[n], san.san.unstructured_name.p, l);
+                names[n][l] = 0;
+                for (char *p = names[n]; *p; p++) *p = (char)tolower((unsigned char)*p);
+                if (pattern_ok(names[n])) n++;
+            }
+        }
+        mbedtls_x509_free_subject_alt_name(&san);
+    }
+    return n;
+}
+
+/* Everything a server certificate needs to be usable. *err set on failure. */
+static int custom_check(mbedtls_x509_crt *chain, mbedtls_pk_context *key, char names[CUS_NAMES_MAX][254], int *nn,
+                        uint32_t ips[CUS_IPS_MAX], int *nip, const char **err)
+{
+    const mbedtls_x509_crt *leaf = chain;
+    if (mbedtls_pk_check_pair(&leaf->pk, key, mbedtls_ctr_drbg_random, &g_drbg) != 0) {
+        for (const mbedtls_x509_crt *c = leaf->next; c && c->raw.len; c = c->next)
+            if (mbedtls_pk_check_pair(&c->pk, key, mbedtls_ctr_drbg_random, &g_drbg) == 0) {
+                *err = "the server certificate must come first, before the CA certificates";
+                return -1;
+            }
+        *err = "the private key does not belong to the certificate";
+        return -1;
+    }
+    if (leaf->private_ca_istrue) { *err = "this is a CA certificate, not a server certificate"; return -1; }
+    mbedtls_pk_type_t kt = mbedtls_pk_get_type(key);
+    if (kt == MBEDTLS_PK_ECKEY) {
+        mbedtls_ecp_group_id g = mbedtls_ecp_keypair_get_group_id(mbedtls_pk_ec(*key));
+        if (g != MBEDTLS_ECP_DP_SECP256R1 && g != MBEDTLS_ECP_DP_SECP384R1) { *err = "EC keys must be P-256 or P-384"; return -1; }
+    } else if (kt == MBEDTLS_PK_RSA) {
+        size_t b = mbedtls_pk_get_bitlen(key);
+        if (b < 2048 || b > 4096) { *err = "RSA keys must be 2048 to 4096 bits"; return -1; }
+    } else { *err = "unsupported key type (use EC P-256/P-384 or RSA)"; return -1; }
+    if (mbedtls_x509_crt_check_extended_key_usage(leaf, MBEDTLS_OID_SERVER_AUTH, MBEDTLS_OID_SIZE(MBEDTLS_OID_SERVER_AUTH)) != 0) {
+        *err = "the certificate is not for servers (extended key usage)";
+        return -1;
+    }
+    if (mbedtls_x509_crt_check_key_usage(leaf, MBEDTLS_X509_KU_DIGITAL_SIGNATURE) != 0) {
+        *err = "the certificate key usage does not allow digital signatures";
+        return -1;
+    }
+    *nn = crt_dns_names(leaf, names, ips, nip);
+    if (*nn == 0 && *nip == 0) { *err = "the certificate has no DNS name or IPv4 address (subjectAltName)"; return -1; }
+    int trusted;
+    time_t now = now_or_build(&trusted);
+    if (trusted && now >= x509_epoch(&leaf->valid_to)) { *err = "the certificate has expired"; return -1; }
+    if (trusted && now < x509_epoch(&leaf->valid_from)) { *err = "the certificate is not valid yet"; return -1; }
     return 0;
+}
+
+/* Load F_CUS_* into g_cus. Caller holds g_lock. 0 ok. */
+static int custom_load(void)
+{
+    pair_t *p = calloc(1, sizeof *p);
+    if (!p) return -1;
+    mbedtls_x509_crt_init(&p->crt);
+    mbedtls_pk_init(&p->key);
+    char names[CUS_NAMES_MAX][254], src[16] = "";
+    uint32_t ips[CUS_IPS_MAX] = { 0 };
+    int nn = 0, nip = 0;
+    const char *err = NULL;
+    if (load_crt(&p->crt, F_CUS_CRT) != 0) err = "the saved custom certificate is unreadable";
+    else if (load_key(&p->key, F_CUS_KEY) != 0) err = "the saved custom key is unreadable";
+    else custom_check(&p->crt, &p->key, names, &nn, ips, &nip, &err);
+    if (err && strcmp(err, "the certificate has expired") != 0) {      /* expired: kept, shown, not served */
+        snprintf(g_cus_err, sizeof g_cus_err, "%s", err);
+        fprintf(stderr, "[tls] custom certificate: %s\n", err);
+        mbedtls_x509_crt_free(&p->crt); mbedtls_pk_free(&p->key); free(p);
+        return -1;
+    }
+    read_file(F_CUS_SRC, src, sizeof src);
+    src[strcspn(src, "\r\n")] = 0;
+    char issuer[160] = "";
+    mbedtls_x509_dn_gets(issuer, sizeof issuer, &p->crt.issuer);
+    sanitize(issuer);
+    pthread_mutex_lock(&g_cur_lock);
+    cus_retire(g_cus);                          /* freed once no handshake holds it */
+    p->prev = NULL;
+    g_cus = p;
+    cus_reap();
+    memcpy(g_cus_names, names, sizeof names);
+    g_cus_n = nn;
+    memcpy(g_cus_ips, ips, sizeof ips);
+    g_cus_nip = nip;
+    g_cus_nb = x509_epoch(&p->crt.valid_from);
+    g_cus_na = x509_epoch(&p->crt.valid_to);
+    snprintf(g_cus_until, sizeof g_cus_until, "%04d-%02d-%02d", p->crt.valid_to.year, p->crt.valid_to.mon, p->crt.valid_to.day);
+    snprintf(g_cus_issuer, sizeof g_cus_issuer, "%s", issuer);
+    snprintf(g_cus_src, sizeof g_cus_src, "%s", !strcmp(src, "acme") ? "acme" : "upload");
+    snprintf(g_cus_err, sizeof g_cus_err, "%s", err ? err : "");
+    pthread_mutex_unlock(&g_cur_lock);
+    printf("[tls] custom certificate (%s) for %s%s until %s\n", g_cus_src, nn ? names[0] : "addresses", nn + nip > 1 ? ",..." : "", g_cus_until);
+    return 0;
+}
+
+/* Find the next PEM block in [p, end): label (e.g. "CERTIFICATE") and the
+ * whole block. 0 found. */
+static int pem_next(const char **p, const char *end, char *label, size_t lcap, const char **bs, const char **be)
+{
+    const char *b = *p;
+    for (;;) {
+        b = memmem(b, (size_t)(end - b), "-----BEGIN ", 11);
+        if (!b) return -1;
+        const char *l = b + 11, *le = memmem(l, (size_t)(end - l), "-----", 5);
+        if (!le || (size_t)(le - l) >= lcap || memchr(l, '\n', (size_t)(le - l))) { b = l; continue; }
+        memcpy(label, l, (size_t)(le - l));
+        label[le - l] = 0;
+        char endmark[96];
+        snprintf(endmark, sizeof endmark, "-----END %s-----", label);
+        const char *e = memmem(le, (size_t)(end - le), endmark, strlen(endmark));
+        if (!e) return -1;
+        *bs = b;
+        *be = e + strlen(endmark);
+        *p = *be;
+        return 0;
+    }
+}
+
+int tls_custom_install(const char *pem, size_t n, const char *source, const char **err)
+{
+    *err = NULL;
+    if (n == 0 || n > CUS_MAX_UPLOAD) { *err = n ? "too large" : "empty upload"; return -1; }
+    if (!g_ready) { *err = "HTTPS is not running yet"; return -1; }
+    /* split: certificates (in order) and one unencrypted private key */
+    /* Each block gets a '\n' appended; blocks may sit back to back in the
+     * upload, so the copy can exceed n (heap overflow found by fuzzing:
+     * "-----BEGIN CERTIFICATE-----END CERTIFICATE-----" x 10). 2n is always
+     * enough; every copy is also bounds-checked. */
+    size_t cap = 2 * n + 2;
+    char *certs = calloc(1, cap), *key = calloc(1, cap);
+    if (!certs || !key) { free(certs); free(key); *err = "out of memory"; return -1; }
+    size_t cl = 0, kl = 0;
+    int ncert = 0, nkey = 0, enc = 0;
+    const char *p = pem, *end = pem + n, *bs, *be;
+    char label[64];
+    while (pem_next(&p, end, label, sizeof label, &bs, &be) == 0) {
+        size_t bl = (size_t)(be - bs);
+        if (!strcmp(label, "CERTIFICATE")) {
+            if (++ncert > 8 || cl + bl + 2 > cap) { ncert = 9; break; }   /* reported below */
+            memcpy(certs + cl, bs, bl); cl += bl; certs[cl++] = '\n';
+        } else if (!strcmp(label, "ENCRYPTED PRIVATE KEY") ||
+                   (strstr(label, "PRIVATE KEY") && memmem(bs, bl, "ENCRYPTED", 9))) {
+            enc = 1;
+        } else if (strstr(label, "PRIVATE KEY")) {
+            if (!nkey && bl + 2 <= cap) { memcpy(key, bs, bl); kl = bl; key[kl++] = '\n'; }
+            nkey++;
+        }
+    }
+    int ret = -1;
+    mbedtls_x509_crt chain;
+    mbedtls_pk_context pk;
+    mbedtls_x509_crt_init(&chain);
+    mbedtls_pk_init(&pk);
+    char names[CUS_NAMES_MAX][254];
+    uint32_t ips[CUS_IPS_MAX];
+    int nn = 0, nip = 0;
+    pthread_mutex_lock(&g_lock);
+    if (!ncert) *err = "no PEM certificate in the upload";
+    else if (ncert > 8) *err = "too many certificates (8 at most)";
+    else if (enc && !nkey) *err = "the private key is encrypted; upload it without a password";
+    else if (!nkey) *err = "no private key in the upload (PEM, unencrypted)";
+    else if (nkey > 1) *err = "more than one private key in the upload";
+    else if (mbedtls_x509_crt_parse(&chain, (unsigned char *)certs, cl + 1) != 0)
+        *err = "a certificate could not be read (keys: EC P-256 / P-384 or RSA 2048-4096)";
+    else if (mbedtls_pk_parse_key(&pk, (unsigned char *)key, kl + 1, NULL, 0, mbedtls_ctr_drbg_random, &g_drbg) != 0)
+        *err = "the private key could not be read";
+    else if (custom_check(&chain, &pk, names, &nn, ips, &nip, err) == 0) {
+        const char *src = source && !strcmp(source, "acme") ? "acme" : "upload";
+        if (write_file(F_CUS_KEY, key, kl, 0600) != 0 || write_file(F_CUS_CRT, certs, cl, 0644) != 0 ||
+            write_file(F_CUS_SRC, src, strlen(src), 0644) != 0) *err = "cannot save";
+        else if (custom_load() != 0) *err = g_cus_err[0] ? g_cus_err : "cannot load";
+        else ret = 0;
+    }
+    pthread_mutex_unlock(&g_lock);
+    mbedtls_x509_crt_free(&chain);
+    mbedtls_pk_free(&pk);
+    mbedtls_platform_zeroize(key, cap);
+    free(key); free(certs);
+    if (ret && !*err) *err = "invalid";
+    return ret;
+}
+
+void tls_custom_clear(void)
+{
+    pthread_mutex_lock(&g_lock);
+    unlink(F_CUS_CRT); unlink(F_CUS_KEY); unlink(F_CUS_SRC);
+    pthread_mutex_lock(&g_cur_lock);
+    cus_retire(g_cus);                               /* freed once no handshake holds it */
+    g_cus = NULL;
+    cus_reap();
+    g_cus_n = g_cus_nip = 0;
+    g_cus_err[0] = g_cus_until[0] = g_cus_issuer[0] = g_cus_src[0] = 0;
+    pthread_mutex_unlock(&g_cur_lock);
+    pthread_mutex_unlock(&g_lock);
+    printf("[tls] custom certificate removed\n");
+}
+
+int tls_custom_state(char *names, size_t cap, char src[8], long *secs_left)
+{
+    pthread_mutex_lock(&g_cur_lock);
+    int have = g_cus != NULL;
+    size_t o = 0;
+    if (cap) names[0] = 0;
+    for (int k = 0; have && k < g_cus_n && o < cap; k++)
+        o += (size_t)snprintf(names + o, cap - o, "%s%s", k ? "," : "", g_cus_names[k]);
+    snprintf(src, 8, "%s", g_cus_src);
+    *secs_left = have ? (long)(g_cus_na - time(NULL)) : 0;
+    pthread_mutex_unlock(&g_cur_lock);
+    return have;
+}
+
+int tls_acme_ca_set(const char *pem, size_t n, const char **err)
+{
+    if (n == 0) { unlink(F_ACME_CA); return 0; }
+    if (n > CUS_MAX_UPLOAD) { *err = "too large"; return -1; }
+    char *buf = malloc(n + 1);
+    if (!buf) { *err = "out of memory"; return -1; }
+    memcpy(buf, pem, n); buf[n] = 0;
+    mbedtls_x509_crt c;
+    mbedtls_x509_crt_init(&c);
+    int ret = -1;
+    if (mbedtls_x509_crt_parse(&c, (unsigned char *)buf, n + 1) != 0) *err = "not a PEM certificate";
+    else if (!c.private_ca_istrue) *err = "not a CA certificate";
+    else if (write_file(F_ACME_CA, buf, n, 0644) != 0) *err = "cannot save";
+    else ret = 0;
+    mbedtls_x509_crt_free(&c);
+    free(buf);
+    return ret;
+}
+
+void tls_acme_ca_desc(char *out, size_t cap)
+{
+    crt_desc(F_ACME_CA, out, cap);
+}
+
+int tls_clock_ok(void)
+{
+    int trusted;
+    now_or_build(&trusted);
+    return trusted;
+}
+
+int tls_rng(void *ctx, unsigned char *out, size_t len)
+{
+    (void)ctx;
+    return mbedtls_ctr_drbg_random(&g_drbg, out, len);
+}
+
+int tls_key_new_pem(char *out, size_t cap)
+{
+    mbedtls_pk_context k;
+    mbedtls_pk_init(&k);
+    pthread_mutex_lock(&g_lock);
+    int ret = seed_once();
+    if (!ret) ret = gen_key(&k);
+    pthread_mutex_unlock(&g_lock);
+    if (!ret) ret = mbedtls_pk_write_key_pem(&k, (unsigned char *)out, cap);
+    mbedtls_pk_free(&k);
+    return ret ? -1 : (int)strlen(out);
 }

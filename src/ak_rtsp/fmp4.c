@@ -62,7 +62,8 @@ static void find_ps(void *ctx, const uint8_t *n, size_t l)
 typedef struct { const uint8_t *d; size_t n, bit; } br_t;
 static int rb(br_t *r) { if (r->bit / 8 >= r->n) return 0; int v = (r->d[r->bit / 8] >> (7 - r->bit % 8)) & 1; r->bit++; return v; }
 static uint32_t rbits(br_t *r, int k) { uint32_t v = 0; while (k--) v = v << 1 | (uint32_t)rb(r); return v; }
-static uint32_t ue(br_t *r) { int z = 0; while (!rb(r) && z < 32) z++; return (1u << z) - 1 + rbits(r, z); }
+/* z < 32: 1u << 32 is undefined (fuzzing); a valid SPS never gets near it */
+static uint32_t ue(br_t *r) { int z = 0; while (!rb(r) && z < 31) z++; return (1u << z) - 1 + rbits(r, z); }
 static int32_t se(br_t *r) { uint32_t v = ue(r); return v & 1 ? (int32_t)((v + 1) / 2) : -(int32_t)(v / 2); }
 static void sps_size(const uint8_t *sps, size_t len, int *w, int *h)
 {
@@ -77,7 +78,7 @@ static void sps_size(const uint8_t *sps, size_t len, int *w, int *h)
     uint32_t cf = 1;
     if (prof == 100 || prof == 110 || prof == 122 || prof == 244 || prof == 44 || prof == 83 || prof == 86 || prof == 118 || prof == 128) {
         cf = ue(&r); if (cf == 3) rb(&r); ue(&r); ue(&r); rb(&r);
-        if (rb(&r)) for (int i = 0; i < (cf != 3 ? 8 : 12); i++) if (rb(&r)) { int last = 8, next = 8; for (int j = 0; j < (i < 6 ? 16 : 64); j++) { if (next) next = (last + se(&r) + 256) % 256; last = next ? next : last; } }
+        if (rb(&r)) for (int i = 0; i < (cf != 3 ? 8 : 12); i++) if (rb(&r)) { int last = 8, next = 8; for (int j = 0; j < (i < 6 ? 16 : 64); j++) { if (next) next = (int)((((int64_t)last + se(&r)) % 256 + 256) % 256); last = next ? next : last; } }
     }
     ue(&r);
     uint32_t poc = ue(&r);
@@ -89,8 +90,10 @@ static void sps_size(const uint8_t *sps, size_t len, int *w, int *h)
     uint32_t cl = 0, cr = 0, ct = 0, cb = 0;
     if (rb(&r)) { cl = ue(&r); cr = ue(&r); ct = ue(&r); cb = ue(&r); }
     int sx = (cf == 0 || cf == 3) ? 1 : 2, sy = (cf == 1 ? 2 : 1) * (2 - fmo);
-    int ww = (int)(pw * 16) - sx * (int)(cl + cr), hh = (int)((2 - fmo) * ph * 16) - sy * (int)(ct + cb);
-    if (ww > 0 && ww <= 4096 && hh > 0 && hh <= 4096) { *w = ww; *h = hh; }
+    /* 64-bit: garbage sizes must not overflow (fuzzing); anything odd falls back to 1920x1080 */
+    int64_t ww = (int64_t)pw * 16 - (int64_t)sx * ((int64_t)cl + cr),
+            hh = (int64_t)(2 - fmo) * ph * 16 - (int64_t)sy * ((int64_t)ct + cb);
+    if (ww > 0 && ww <= 4096 && hh > 0 && hh <= 4096) { *w = (int)ww; *h = (int)hh; }
 }
 
 /* ---- writer ----------------------------------------------------------------- */
@@ -187,6 +190,8 @@ fmp4_t *fmp4_open(FILE *f, const uint8_t *key, size_t len, int with_audio)
 }
 
 uint64_t fmp4_video_start_ms(const fmp4_t *m) { return m->t0_ms; }
+void fmp4_set_video_time(fmp4_t *m, uint64_t t90) { m->vdec = t90; }
+uint64_t fmp4_video_time(const fmp4_t *m) { return m->vdec; }
 
 static void add_nal(void *ctx, const uint8_t *n, size_t l)
 {

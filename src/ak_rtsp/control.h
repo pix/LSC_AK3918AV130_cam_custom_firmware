@@ -24,7 +24,9 @@ void control_stop(void);
 /* fd of the SD-card copy of the log (test mode), or -1. Async-signal-safe. */
 int  control_sd_log_fd(void);
 /* Last fatal signal of ak_rtsp, written by main.c's handler: "time=<unix> FATAL: ..." */
+#ifndef LAST_CRASH_FILE
 #define LAST_CRASH_FILE "/etc/config/ak_rtsp_lastcrash"
+#endif
 
 /* Port 8091 now requires "AUTH <user> <password>" (same login as RTSP/web)
  * before any other command; LOG lines are only pushed after AUTH. */
@@ -48,6 +50,7 @@ int  control_saved_get(const char *name, char *out, size_t cap);
  * a separate 0600 file that "reset settings" leaves alone. Register before
  * control_load_ext_settings(). get() writes the current value; set()
  * validates and applies, returning 0 or -1 with *err. */
+#define CTRL_VALUE_MAX 704      /* longest setting value + NUL (acme.domains: 599 chars) */
 #define CTRL_PERSIST 1
 #define CTRL_SECRET  2          /* shown as "(set)" outside the camera */
 typedef struct {

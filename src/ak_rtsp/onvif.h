@@ -23,7 +23,9 @@ struct sockaddr;
  * over TLS; *penalty set to 1 on a failed login (the caller delays). */
 int  onvif_handle(conn_t *cn, const char *path, const char *body, const char *host, const char *authz,
                   const struct sockaddr *peer, int is_tls, int *penalty);
-/* Motion / sound state changes for PullPoint subscribers (events.c). */
+/* Motion / sound state changes for PullPoint subscribers (events.c).
+ * "line": on = object id of a crossing (LineDetector/Crossed, an event);
+ * "loiter": FieldDetector/ObjectsInside (a property). */
 void onvif_event(const char *kind, int on);
 /* Hourly system state for HA sensors: temperature (0.1 C, -9999 unknown), SD card
  * present, free/total space (KB); fires StorageFailure and LastReboot on change. */

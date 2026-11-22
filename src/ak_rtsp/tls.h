@@ -32,7 +32,9 @@ conn_t *tls_accept(int fd, int handshake_ms);
 /* Settings (TLS_DIR/ak_rtsp_tls.conf). names: comma/space separated DNS
  * names, validated. Re-issues the certificate when names change.
  * 0 ok, -1 with *err. */
-int  tls_set_config(const char *names, int redirect, const char **err);
+/* custom_all: 1 = the custom certificate (while valid) for every connection,
+ * replacing the camera certificate; -1 = unchanged. */
+int  tls_set_config(const char *names, int redirect, int custom_all, const char **err);
 int  tls_name_ok(const char *host);   /* host is a configured certificate name */
 int  tls_redirect(void);              /* 1 = send HTTP clients to HTTPS */
 /* New CA (devices must re-install it) + new server certificate. */
@@ -46,8 +48,28 @@ int  tls_server_pem(char *out, size_t cap);
  *  across renewals, so srv_spki is a stable pin; srv_sha256 changes. */
 int  tls_info_json(char *out, size_t cap);
 
+/* ---- custom server certificate (uploaded, or issued by ACME) ----
+ * Served to clients whose SNI matches one of its DNS names (wildcards
+ * included) while it is valid; every other connection keeps the camera-CA
+ * certificate. pem: the chain (server certificate first) and its
+ * unencrypted private key, in any order, in one buffer.
+ * source: "upload" or "acme". 0 ok, -1 with *err. */
+int  tls_custom_install(const char *pem, size_t n, const char *source, const char **err);
+void tls_custom_clear(void);
+/* 1 if a custom certificate is loaded: its names (comma separated), source
+ * and seconds until it expires. */
+int  tls_custom_state(char *names, size_t cap, char src[8], long *secs_left);
+/* Extra CA trusted by the ACME client (private ACME server, Pebble,
+ * self-hosted acme-dns). n == 0 removes it. */
+int  tls_acme_ca_set(const char *pem, size_t n, const char **err);
+void tls_acme_ca_desc(char *out, size_t cap);
+int  tls_clock_ok(void);                                 /* clock set (NTP), not the build date */
+int  tls_rng(void *ctx, unsigned char *out, size_t len);  /* mbedTLS f_rng (after tls_init) */
+int  tls_key_new_pem(char *out, size_t cap);             /* new EC P-256 key, PEM */
+
 /* ---- MQTT over TLS (client side) ----
- * verify: 0 none (testing), 1 broker CA (chain + host name/IP), 2 pinned broker key.
+ * verify: 0 none (testing), 1 broker CA (chain + host name/IP), 2 pinned broker key,
+ * 3 public server (built-in roots + the extra ACME CA; used by acme.c).
  * client_cert: 0 none, 1 issued by the camera CA (CN = cn), 2 uploaded /
  * signed from our CSR. Takes ownership of fd. NULL + err on failure. */
 conn_t *tls_client_connect(int fd, const char *host, int verify, int client_cert, const char *cn,

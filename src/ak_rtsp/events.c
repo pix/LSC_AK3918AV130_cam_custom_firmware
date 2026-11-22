@@ -8,6 +8,7 @@
 #include "record.h"
 #include "onvif.h"
 #include "sched.h"
+#include "notify.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,6 +94,25 @@ void events_tamper(int state)
     push("tamper", on, state);
 }
 
+static volatile int g_line, g_loiter;
+void events_line(int on, int dir, int id)
+{
+    if ((!on && !g_line) || (on && !sched_events_ok())) return;
+    g_line = on;
+    printf("[events] line %s\n", !on ? "off" : dir == 1 ? "crossed (to the left)" : "crossed (to the right)");
+    if (on) onvif_event("line", id > 0 ? id : 1);
+    push("line", on, dir);
+}
+
+void events_loiter(int on, int zone)
+{
+    if (on == g_loiter || (on && !sched_events_ok())) return;
+    g_loiter = on;
+    printf("[events] loiter %s (zone %d)\n", on ? "ON" : "off", zone);
+    onvif_event("loiter", on);
+    push("loiter", on, zone);
+}
+
 /* ---- outgoing webhook (plain HTTP POST, JSON) ------------------------------- */
 static void webhook(const ev_t *e)
 {
@@ -119,6 +139,12 @@ static void webhook(const ev_t *e)
     if (!strcmp(e->kind, "tamper"))
         bl = snprintf(body, sizeof body, "{\"camera\":\"%s\",\"event\":\"tamper\",\"state\":\"%s\",\"time\":\"%s\",\"reason\":\"%s\"}",
                       sys_device_name(), e->on ? "on" : "off", ts, e->level == 1 ? "covered" : e->level == 2 ? "moved" : "");
+    if (!strcmp(e->kind, "line"))
+        bl = snprintf(body, sizeof body, "{\"camera\":\"%s\",\"event\":\"line\",\"state\":\"%s\",\"time\":\"%s\",\"direction\":\"%s\"}",
+                      sys_device_name(), e->on ? "on" : "off", ts, e->level == 1 ? "left" : e->level == 2 ? "right" : "");
+    if (!strcmp(e->kind, "loiter"))
+        bl = snprintf(body, sizeof body, "{\"camera\":\"%s\",\"event\":\"loiter\",\"state\":\"%s\",\"time\":\"%s\",\"zone\":%d}",
+                      sys_device_name(), e->on ? "on" : "off", ts, e->level);
     char ps[8];
     snprintf(ps, sizeof ps, "%d", port);
     struct addrinfo hints = { 0 }, *res = NULL;
@@ -139,6 +165,12 @@ static void webhook(const ev_t *e)
     int rl = snprintf(req, sizeof req, "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\n"
                       "Content-Length: %d\r\nConnection: close\r\nUser-Agent: ak_rtsp\r\n\r\n%s", path, host, bl, body);
     char resp[64] = "";
+    /* never send past the buffer (today's URL limits keep it < 500 bytes) */
+    if (rl < 0 || (size_t)rl >= sizeof req) {
+        snprintf(g_hook_status, sizeof g_hook_status, "error: webhook URL too long");
+        close(fd);
+        return;
+    }
     if (send(fd, req, (size_t)rl, MSG_NOSIGNAL) == rl) {
         ssize_t n = recv(fd, resp, sizeof resp - 1, 0);
         if (n > 0) resp[n] = 0;
@@ -161,7 +193,9 @@ static void *worker(void *arg)
         g_qh = (g_qh + 1) % QN; g_qn--;
         pthread_mutex_unlock(&g_lock);
 
+        if (e.on) notify_event(e.kind, e.level, e.t);  /* push notification: only queued here */
         if (g_hook) g_hook(e.kind, e.on);
+        if (!strcmp(e.kind, "line") && e.on) mqtt_publish_str("line_direction", e.level == 1 ? "left" : "right", 1);
         mqtt_publish_str(e.kind, e.on ? "ON" : "OFF", 1);
         if (!strcmp(e.kind, "motion") && e.on && s_snapshot && mqtt_connected()) {
             int n = snapshot_jpeg(jpg, sizeof jpg, 0);

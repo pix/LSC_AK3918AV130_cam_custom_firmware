@@ -33,7 +33,7 @@
 #endif
 
 /* ---- registered parameters (modules add their own settings) ---------------- */
-#define MAX_REG 96
+#define MAX_REG 128                    /* ~100 in use (notify.* added 15) */
 static ctrl_param_t g_reg[MAX_REG];
 static int g_nreg;
 
@@ -79,8 +79,12 @@ static void settings_save(void);
 static int             g_orig_stdout = -1; /* real stdout fd (serial console) */
 static int             g_log_pipe_r  = -1;
 static int             g_sd_log      = -1;   /* test mode: copy of stdout on the SD card */
+#ifndef SD_LOG_FLAG                         /* overridable for the host build (tests/host) */
 #define SD_LOG_FLAG "/tmp/sd/maint/ak_rtsp.log.enable"
+#endif
+#ifndef SD_LOG_FILE
 #define SD_LOG_FILE "/tmp/sd/maint/ak_rtsp.log"
+#endif
 
 /* isp.saturation/contrast/brightness/sharpness — the isp_set_*() functions
  * (isp.c) are one-way (GET-modify-SET against the hardware, no getter for
@@ -222,7 +226,7 @@ static void do_list(sink_t *fd)
     reply(fd, "venc.minqp=28 (read-only)");
     reply(fd, "venc.maxqp=43 (read-only)");
     for (int i = 0; i < g_nreg; i++) {
-        char v[256] = "";
+        char v[CTRL_VALUE_MAX] = "";
         g_reg[i].get(v, sizeof(v));
         if (g_reg[i].flags & CTRL_SECRET) reply(fd, "%s=%s", g_reg[i].name, v[0] ? "(set)" : "");
         else reply(fd, "%s=%s", g_reg[i].name, v);
@@ -262,7 +266,7 @@ static void do_get(sink_t *fd, const char *param)
     else if (!strcmp(param, "venc.maxqp"))            reply(fd, "venc.maxqp=43 (read-only)");
     else if (reg_find(param)) {
         const ctrl_param_t *r = reg_find(param);
-        char v[256] = "";
+        char v[CTRL_VALUE_MAX] = "";
         r->get(v, sizeof(v));
         if (r->flags & CTRL_SECRET) reply(fd, "%s=%s", param, v[0] ? "(set)" : "");
         else reply(fd, "%s=%s", param, v);
@@ -406,7 +410,7 @@ static int do_set_inner(sink_t *fd, const char *param, const char *value)
         const char *err = "invalid value";
         if (r->set(value, &err) != 0) { reply(fd, "ERR %s: %s", param, err); return -1; }
         if (r->flags & CTRL_SECRET) reply(fd, "OK %s=(set)", param);
-        else { char v[256] = ""; r->get(v, sizeof(v)); reply(fd, "OK %s=%s", param, v); }
+        else { char v[CTRL_VALUE_MAX] = ""; r->get(v, sizeof(v)); reply(fd, "OK %s=%s", param, v); }
         if (!g_loading_settings && (r->flags & CTRL_PERSIST)) ext_save();
         return 1;                                     /* saved separately */
     } else if (!strcmp(param, "venc.minqp") || !strcmp(param, "venc.maxqp")) {
@@ -566,17 +570,22 @@ int control_saved_get(const char *name, char *out, size_t cap)
  * Values are single-line printable text (setters reject control chars). */
 static void ext_save(void)
 {
-    char *buf = malloc(16384);
-    if (!buf) return;
+    /* room for every setting at its longest: a full buffer used to drop the
+     * settings after it (and the file was replaced without them), and values
+     * were cut at 255 characters (acme.domains allows 599) */
+    size_t cap = (size_t)g_nreg * (64 + CTRL_VALUE_MAX) + 1;
+    char *buf = malloc(cap), *v = malloc(CTRL_VALUE_MAX);
+    if (!buf || !v) { free(buf); free(v); return; }
     size_t len = 0;
     for (int i = 0; i < g_nreg; i++) {
         if (!(g_reg[i].flags & CTRL_PERSIST)) continue;
-        char v[256] = "";
-        g_reg[i].get(v, sizeof(v));
-        int n = snprintf(buf + len, 16384 - len, "%s\t%s\n", g_reg[i].name, v);
-        if (n < 0 || len + (size_t)n >= 16384) break;
+        v[0] = 0;
+        g_reg[i].get(v, CTRL_VALUE_MAX);
+        int n = snprintf(buf + len, cap - len, "%s\t%s\n", g_reg[i].name, v);
+        if (n < 0 || len + (size_t)n >= cap) { free(buf); free(v); fprintf(stderr, "[control] ext settings too large, not saved\n"); return; }
         len += (size_t)n;
     }
+    free(v);
     const char *tmp = EXT_SETTINGS_FILE ".tmp";
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd >= 0) {
@@ -591,7 +600,7 @@ void control_load_ext_settings(void)
 {
     FILE *f = fopen(EXT_SETTINGS_FILE, "r");
     if (!f) return;
-    char line[512];
+    char line[64 + CTRL_VALUE_MAX + 8];          /* name, tab, the longest value */
     int n = 0;
     g_loading_settings = 1;
     while (fgets(line, sizeof(line), f)) {
@@ -617,7 +626,7 @@ int control_set_value(const char *name, const char *value, const char **err)
     for (const char *p = value; *p; p++)
         if ((unsigned char)*p < 0x20 || *p == 0x7f) { *err = "control characters not allowed"; return -1; }
     pthread_mutex_lock(&g_exec_lock);
-    char before[512] = "", after[512] = "";
+    char before[CTRL_VALUE_MAX] = "", after[CTRL_VALUE_MAX] = "";   /* whole values: a change past 511 chars was not saved */
     r->get(before, sizeof before);
     int ret = r->set(value, err);
     if (ret == 0) r->get(after, sizeof after);
@@ -645,7 +654,7 @@ int control_params_json(const char *prefix, char *out, size_t cap)
     n += (size_t)snprintf(out + n, cap - n, "{");
     for (int i = 0; i < g_nreg && n < cap; i++) {
         if (strncmp(g_reg[i].name, prefix, pl)) continue;
-        char v[256];
+        char v[CTRL_VALUE_MAX];                  /* whole value: the page saves back what it shows */
         control_get_value(g_reg[i].name, v, sizeof(v), 0);
         n += (size_t)snprintf(out + n, n < cap ? cap - n : 0, "%s\"%s\":\"", n > 1 ? "," : "", g_reg[i].name);
         for (const char *p = v; *p && n + 8 < cap; p++) {

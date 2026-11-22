@@ -25,6 +25,7 @@
 #include "control.h"
 #include "auth.h"
 #include "web.h"
+#include "hls.h"
 #include "resetkey.h"
 #include "system.h"
 #include "netcfg.h"
@@ -33,7 +34,9 @@
 #include "osd.h"
 #include "osd_hw.h"
 #include "mqtt.h"
+#include "acme.h"
 #include "events.h"
+#include "notify.h"
 #include "sounddet.h"
 #include "md.h"
 #include "tamper.h"
@@ -189,7 +192,7 @@ static void close_devices(void)
  *
  * Init sequence:
  *   venc_reset_stale_channel  — clear any state left by a killed anyka_ipc
- *   open_devices              — open all /dev/* nodes
+ *   open_devices              — open all /dev/... nodes
  *   isp_load_sensor_conf      — program GC20C3 I2C registers
  *   isp_pipeline_init         — program 24 ISP image-pipeline modules
  *   venc_reset_stale_channel  — clear any state left by a killed anyka_ipc
@@ -345,7 +348,9 @@ int main(int argc, char **argv)
     sys_register_params();
     audio_register_params();
     mqtt_init();
+    acme_init();
     events_init();
+    notify_init();
     sounddet_init();
     md_init();
     tamper_init();
@@ -353,6 +358,7 @@ int main(int argc, char **argv)
     sched_init();
     substream_init();
     web_register_params();
+    hls_register_params();
     term_init();
     npu_init();
     venc_register_params();
@@ -463,7 +469,9 @@ int main(int argc, char **argv)
         if (!strstr(buf, "network={")) qrwifi_start(600, "no Wi-Fi configured");
     }
     events_start();
+    notify_start();                     /* push notifications: idle unless notify.enabled / a test */
     mqtt_start();
+    acme_start();                       /* idle unless acme.enabled */
     md_start();
     tamper_start();
     sched_start();

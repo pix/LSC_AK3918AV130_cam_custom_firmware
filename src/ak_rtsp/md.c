@@ -1,4 +1,5 @@
 #include "md.h"
+#include "md_logic.h"
 #include "events.h"
 #include "osd.h"
 #include "isp.h"
@@ -19,60 +20,24 @@ static volatile int g_hwmax, g_hwp90;
 /* ---- hardware motion statistics (stock libak_md / libmrd, see RE notes) ----
  * ISP 3D-NR statistic: u16[24][32] per-block motion values at payload+2,
  * refreshed every frame once the 3D NR reference frames exist (ae.c).
- * Cells >= hi seed regions grown over cells >= lo (8-connected); a region
- * counts when its bounding box is between min_cells(sensitivity) and 300
- * cells and at least min_cells of its cells are in the watched zones.
- * Stock uses fixed 10000/5000; measured on this camera the still-scene
- * floor is p90 ~500 (day) / ~200 (night IR) with single cells up to ~1700,
- * and a person gives 10-20 cells >= 1000, peaks 3000-11000. So the
- * thresholds follow the noise: hi = max(1800, 3.5 p90), lo = hi / 2. */
+ * The decision (noise-following thresholds, region growing, light changes)
+ * is in md_logic.c. */
 #define INNER_GET_3DNR_STAT 0x80044970
 #define HW_ROWS 24
-static const uint8_t k_min_cells[101] = {
-    50,49,48,47,46,45,44,43,42,41,40,39,38,37,36,35,34,33,32,31,30,29,28,27,27,26,25,24,24,23,22,21,21,20,19,18,18,17,16,15,15,14,
-    14,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,9,9,9,9,9,9,9,9,8,8,8,8,8,8,8,8,7,7,7,7,6,6,6,6,6,6,6,6,
-    5,5,5,5,4,4,4,4 };          /* stock table @0x410480 */
-
-/* returns 1 if a qualifying region exists; marks cells of accepted regions in act[24*32] */
-static int hw_detect(const uint16_t *g, const uint8_t *watch24, int sens, uint8_t *act, int hi, int lo)
-{
-    static uint8_t seen[HW_ROWS * 32];
-    static uint16_t stack[HW_ROWS * 32];
-    memset(seen, 0, sizeof seen);
-    memset(act, 0, HW_ROWS * 32);
-    int minc = k_min_cells[sens < 0 ? 0 : sens > 100 ? 100 : sens], found = 0;
-    for (int i = 0; i < HW_ROWS * 32; i++) {
-        if (seen[i] || g[i] < hi) continue;
-        int sp = 0, r0 = 99, r1 = -1, c0 = 99, c1 = -1, watched = 0, n = 0;
-        static uint16_t cells[HW_ROWS * 32];
-        stack[sp++] = (uint16_t)i; seen[i] = 1;
-        while (sp) {
-            int k = stack[--sp], r = k / 32, c = k % 32;
-            cells[n++] = (uint16_t)k;
-            if (r < r0) r0 = r; if (r > r1) r1 = r; if (c < c0) c0 = c; if (c > c1) c1 = c;
-            watched += watch24[k];
-            for (int dr = -1; dr <= 1; dr++)
-                for (int dc = -1; dc <= 1; dc++) {
-                    int rr = r + dr, cc = c + dc;
-                    if (rr < 0 || rr >= HW_ROWS || cc < 0 || cc >= 32) continue;
-                    int kk = rr * 32 + cc;
-                    if (!seen[kk] && g[kk] >= lo) { seen[kk] = 1; stack[sp++] = (uint16_t)kk; }
-                }
-        }
-        int area = (r1 - r0 + 1) * (c1 - c0 + 1);
-        if (area >= minc && area <= 300 && watched >= minc) {
-            found = 1;
-            for (int j = 0; j < n; j++) act[cells[j]] = 1;
-        }
-    }
-    return found;
-}
 static char s_zones[NB / 4 + 1];                    /* hex; "" = whole picture */
 static uint8_t g_zone[NB];                          /* expanded mask */
 static volatile int g_score, g_motion;
 static volatile int g_motion_any;                   /* same detector, whole picture (no events) */
 int md_motion_any(void) { return s_enabled && g_motion_any; }
 static uint8_t g_active[NB];
+
+/* options of md_logic.h (all off by default) */
+static int s_min_size, s_persist, s_light, s_loiter, s_loiter_zone, s_line_dir;
+static char s_zone_sens[8 * 17], s_line[24];
+static mdl_zone_t s_zone[MDL_MAX_ZONES];
+static int s_nzones, s_line_xy[4], s_line_on;
+static volatile int g_line, g_loiter, g_light, g_ntrk;
+static mdl_track_out_t g_trk[MDL_MAX_TRACKS];
 
 static void zones_expand(void)
 {
@@ -105,53 +70,122 @@ CTRL_INT(p_sens, s_sens, 1, 100)
 CTRL_INT(p_hold, s_hold, 2, 300)
 CTRL_STR(p_zones, s_zones, zones_ok, "must be 144 hex digits (32x18 grid) or empty")
 static int p_zones_setx(const char *v, const char **e) { int r = p_zones_set(v, e); if (!r) zones_expand(); return r; }
-static int p_en_setx(const char *v, const char **e) { int r = p_en_set(v, e); if (!r && !s_enabled) events_motion(0); return r; }
+static int p_en_setx(const char *v, const char **e)
+{
+    int r = p_en_set(v, e);
+    if (!r && !s_enabled) { events_motion(0); events_line(0, 0, 0); events_loiter(0, 0); }
+    return r;
+}
+
+/* ---- options (docs/motion.md) ---- */
+CTRL_INT(p_minsz, s_min_size, 0, 50)
+CTRL_INT(p_persist, s_persist, 0, 10000)
+CTRL_INT(p_loiter, s_loiter, 0, 600)
+CTRL_INT(p_lzone, s_loiter_zone, 0, 8)
+static int zsens_ok(const char *v) { return mdl_parse_zones(v, NULL, MDL_MAX_ZONES) >= 0; }
+CTRL_STR(p_zsens, s_zone_sens, zsens_ok, "must be up to 8 zones c0,r0,c1,r1,sensitivity separated by ; (columns 0-31, rows 0-17, sensitivity 1-100) or empty")
+static int p_zsens_setx(const char *v, const char **e)
+{
+    int r = p_zsens_set(v, e);
+    if (!r) { mdl_zone_t z[MDL_MAX_ZONES]; int n = mdl_parse_zones(s_zone_sens, z, MDL_MAX_ZONES); s_nzones = 0; if (n > 0) { memcpy(s_zone, z, sizeof z); s_nzones = n; } }
+    return r;
+}
+static int line_ok(const char *v) { return mdl_parse_line(v, NULL) >= 0; }
+CTRL_STR(p_line, s_line, line_ok, "must be x0,y0,x1,y1 (0-1000, end points at least 20 apart) or empty")
+static int p_line_setx(const char *v, const char **e)
+{
+    int r = p_line_set(v, e);
+    if (!r) { int l[4]; s_line_on = 0; if (mdl_parse_line(s_line, l) == 1) { memcpy(s_line_xy, l, sizeof l); s_line_on = 1; } }
+    return r;
+}
+static const char *const k_dirs[] = { "both", "left", "right" };
+static int p_ldir_get(char *o, size_t c) { snprintf(o, c, "%s", k_dirs[s_line_dir]); return 0; }
+static int p_ldir_set(const char *v, const char **e)
+{
+    for (int i = 0; i < 3; i++) if (!strcmp(v, k_dirs[i])) { s_line_dir = i; return 0; }
+    *e = "must be both, left or right";
+    return -1;
+}
+static int p_light_get(char *o, size_t c) { snprintf(o, c, "%d", s_light); return 0; }
+static int p_light_set(const char *v, const char **e)
+{
+    char *end;
+    long x = strtol(v, &end, 10);
+    if (!*v || *end || (x != 0 && (x < 10 || x > 90))) { *e = "must be 0 (off) or a percentage from 10 to 90"; return -1; }
+    s_light = (int)x;
+    return 0;
+}
+
+static void cfg_build(mdl_cfg_t *c)
+{
+    memset(c, 0, sizeof *c);
+    c->sens = s_sens; c->hold_s = s_hold;
+    c->nzones = s_nzones; memcpy(c->zone, s_zone, sizeof c->zone);
+    c->min_size = s_min_size; c->persist_ms = s_persist; c->light_pct = s_light;
+    c->line_on = s_line_on; memcpy(c->line, s_line_xy, sizeof c->line); c->line_dir = s_line_dir;
+    c->loiter_s = s_loiter; c->loiter_zone = s_loiter_zone;
+}
+
+/* act on a decision: events on changes only */
+static void md_act(const mdl_out_t *o)
+{
+    g_motion_any = o->motion_any;
+    if (o->motion != g_motion) { g_motion = o->motion; events_motion(g_motion); }
+    for (int i = 0; i < o->ncross; i++) events_line(1, o->cross[i].dir, o->cross[i].id);
+    if (o->line != g_line) { g_line = o->line; if (!g_line) events_line(0, 0, 0); }
+    if (o->loiter != g_loiter) { g_loiter = o->loiter; events_loiter(g_loiter, s_loiter_zone); }
+    g_light = o->light;
+    for (int i = 0; i < o->ntracks; i++) g_trk[i] = o->track[i];
+    g_ntrk = o->ntracks;
+}
 
 int md_status_json(char *out, size_t cap)
 {
-    char act[NB / 4 + 1];
+    char act[NB / 4 + 1], trk[MDL_MAX_TRACKS * 20 + 1] = "";
     for (int i = 0; i < NB / 4; i++) {
         int v = g_active[i * 4] << 3 | g_active[i * 4 + 1] << 2 | g_active[i * 4 + 2] << 1 | g_active[i * 4 + 3];
         act[i] = "0123456789abcdef"[v];
     }
     act[NB / 4] = 0;
+    int nt = g_ntrk;
+    for (int i = 0, o = 0; i < nt && i < MDL_MAX_TRACKS && o < (int)sizeof trk; i++)
+        o += snprintf(trk + o, sizeof trk - (size_t)o, "%s[%d,%d,%d]", i ? "," : "", g_trk[i].id, g_trk[i].x, g_trk[i].y);
     /* the hardware statistic only updates while 3D NR runs (ae.c) */
     const char *note = !s_hw ? "" : ae_tnr_state() == 1 ? "" :
         ae_tnr_state() == -1 ? "the image processor statistic is unavailable: 3D noise reduction was turned off after an "
                                "incomplete start. Choose this detector again and restart the camera to retry."
                              : "the image processor statistic is unavailable (3D noise reduction is not running)";
-    return snprintf(out, cap, "{\"enabled\":%s,\"motion\":%s,\"motion_any\":%s,\"score\":%d,\"cols\":%d,\"rows\":%d,\"active\":\"%s\",\"zones\":\"%s\",\"source\":\"%s\",\"hwmax\":%d,\"hwp90\":%d,\"hw_note\":\"%s\"}",
+    return snprintf(out, cap, "{\"enabled\":%s,\"motion\":%s,\"motion_any\":%s,\"score\":%d,\"cols\":%d,\"rows\":%d,\"active\":\"%s\",\"zones\":\"%s\",\"source\":\"%s\",\"hwmax\":%d,\"hwp90\":%d,\"hw_note\":\"%s\","
+                    "\"line\":%s,\"loiter\":%s,\"light\":%s,\"tracks\":[%s]}",
                     s_enabled ? "true" : "false", g_motion ? "true" : "false", g_motion_any ? "true" : "false", g_score, MD_COLS, MD_ROWS, act, s_zones,
-                    s_hw ? "hardware" : "software", g_hwmax, g_hwp90, note);
+                    s_hw ? "hardware" : "software", g_hwmax, g_hwp90, note,
+                    g_line ? "true" : "false", g_loiter ? "true" : "false", g_light ? "true" : "false", trk);
 }
 
 static void *md_thread(void *arg)
 {
     (void)arg;
     static uint8_t frame[640 * 368 * 3 / 2];
-    static float bg[NB];
-    int have_bg = 0, run = 0, was_night = night_is_night();
-    int64_t last_hit = 0, quiet_until = 0, last_any = 0;
-    int run_any = 0;
+    static mdl_t st;
+    static mdl_out_t res;
+    mdl_init(&st);
+    int was_night = night_is_night();
     for (;;) {
         usleep(250000);
         int64_t now = mono_ms();
         int night = night_is_night();
-        if (night != was_night) { was_night = night; have_bg = 0; quiet_until = now + (s_hw ? 10000 : 5000); }   /* IR switching: stock pauses 5 s; the 3D-NR statistic settles in ~8 s */
-        if (!s_enabled) { have_bg = 0; g_score = 0; g_motion = 0; g_motion_any = 0; continue; }
+        if (night != was_night) { was_night = night; mdl_night_switch(&st, now, s_hw); }
+        if (!s_enabled) { mdl_disabled(&st); g_score = 0; g_motion = 0; g_motion_any = 0; g_line = 0; g_loiter = 0; g_ntrk = 0; continue; }
+        mdl_cfg_t cfg;
         if (s_hw) {
             /* 10 Hz like stock: this pass plus 1 more inside */
             static uint8_t stat[0x608];
-            static int hist;                           /* night: 2 of the last 3 polls */
             for (int pass = 0; pass < 2; pass++) {
                 if (pass) usleep(100000);
                 if (isp_tunnel(INNER_GET_3DNR_STAT, stat) != 0) break;
                 const uint16_t *g = (const uint16_t *)(stat + 2);
-                int mx = 0;
-                for (int i = 0; i < HW_ROWS * 32; i++) if (g[i] > mx) mx = g[i];
-                g_hwmax = mx;
                 /* watched cells: UI zones (32x18) mapped to the 32x24 grid, minus overlay rows */
-                uint8_t watch[HW_ROWS * 32], act[HW_ROWS * 32], watch_all[HW_ROWS * 32], act_all[HW_ROWS * 32];
+                uint8_t watch[HW_ROWS * 32], watch_all[HW_ROWS * 32];
                 osd_cfg_t oc; osd_get(&oc);
                 int o0 = -1, o1 = -1;
                 if (s_ignore_osd && oc.enabled) {           /* main overlay: 78 px band at 16 px from an edge */
@@ -163,45 +197,16 @@ static void *md_thread(void *arg)
                         watch_all[r * 32 + c] = (uint8_t)!(r >= o0 && r <= o1);
                         watch[r * 32 + c] = (uint8_t)(g_zone[(r * MD_ROWS / HW_ROWS) * MD_COLS + c] && watch_all[r * 32 + c]);
                     }
-                /* noise floor: 90th percentile (counting sort on a coarse scale) */
-                static uint16_t hcnt[256];
-                memset(hcnt, 0, sizeof hcnt);
-                for (int i = 0; i < HW_ROWS * 32; i++) hcnt[g[i] >= 65280 ? 255 : g[i] >> 8]++;
-                int acc = 0, p50 = -1, p90 = 0;
-                for (int b = 0; b < 256; b++) {
-                    acc += hcnt[b];
-                    if (p50 < 0 && acc >= HW_ROWS * 32 / 2) p50 = b * 256 + 128;
-                    if (acc >= HW_ROWS * 32 * 9 / 10) { p90 = b * 256 + 128; break; }
-                }
-                int hi = p90 * 7 / 2; if (hi < 1800) hi = 1800;
-                int lo = hi / 2;
-                g_hwp90 = p90;
-                /* most of the picture changed at once (lights, IR switch, AE jump): not
-                 * motion. The median follows the light level (~100 bright IR, ~300 lit
-                 * room, ~1000 dark room), so compare it with a slow baseline; a jump
-                 * that lasts over 5 s becomes the new baseline. */
-                static int base50 = -1, glob_n;
-                if (base50 < 0) base50 = p50;
-                int global = p50 > base50 * 3 + 400;
-                if (global) { if (++glob_n > 50) { base50 = p50; glob_n = 0; } }
-                else { glob_n = 0; base50 += (p50 - base50) / 32; }
-                int hit = global ? 0 : hw_detect(g, watch, s_sens, act, hi, lo);
-                int64_t t = mono_ms();
+                cfg_build(&cfg);
+                mdl_in_t in = { mono_ms(), night, watch, watch_all };
+                mdl_hw_frame(&st, &cfg, g, &in, &res);
+                g_hwmax = res.hwmax;
+                g_hwp90 = res.hwp90;
                 for (int i = 0; i < NB; i++) g_active[i] = 0;
-                int score = 0;
                 for (int r = 0; r < HW_ROWS; r++) for (int c = 0; c < 32; c++)
-                    if (act[r * 32 + c]) { g_active[(r * MD_ROWS / HW_ROWS) * MD_COLS + c] = 1; score++; }
-                g_score = score;
-                hist = ((hist << 1) | hit) & 7;
-                int ok = night ? __builtin_popcount(hist) >= 2 : hit;
-                if (t >= quiet_until && ok) { last_hit = t; if (!g_motion) { g_motion = 1; events_motion(1); } }
-                if (g_motion && t - last_hit > (int64_t)s_hold * 1000) { g_motion = 0; events_motion(0); }
-                /* whole picture, same rules (only wakes the frame rate) */
-                static int hist_all;
-                int hit_all = global ? 0 : hw_detect(g, watch_all, s_sens, act_all, hi, lo);
-                hist_all = ((hist_all << 1) | hit_all) & 7;
-                if (t >= quiet_until && (night ? __builtin_popcount(hist_all) >= 2 : hit_all)) { last_any = t; g_motion_any = 1; }
-                if (g_motion_any && t - last_any > (int64_t)s_hold * 1000) g_motion_any = 0;
+                    if (res.active[r * 32 + c]) g_active[(r * MD_ROWS / HW_ROWS) * MD_COLS + c] = 1;
+                g_score = res.score;
+                md_act(&res);
             }
             continue;
         }
@@ -219,47 +224,23 @@ static void *md_thread(void *arg)
             }
         }
         float cur[NB];
+        uint8_t watch[NB], watch_all[NB];
         for (int r = 0; r < MD_ROWS; r++)
             for (int c = 0; c < MD_COLS; c++) {
                 uint32_t sum = 0;
                 for (int y = r * bh; y < (r + 1) * bh; y += 2)        /* every other row/column: plenty */
                     for (int x = c * bw; x < (c + 1) * bw; x += 2) sum += frame[y * w + x];
-                cur[r * MD_COLS + c] = (float)sum / (float)((bh / 2) * (bw / 2));
+                int i = r * MD_COLS + c;
+                cur[i] = (float)sum / (float)((bh / 2) * (bw / 2));
+                watch_all[i] = (uint8_t)!(r >= osd_r0 && r <= osd_r1);
+                watch[i] = (uint8_t)(g_zone[i] && watch_all[i]);
             }
-        if (!have_bg) { for (int i = 0; i < NB; i++) bg[i] = cur[i]; have_bg = 1; continue; }
-
-        /* sensitivity 1..100 -> per-block luma threshold 40..5, area 6%..0.4% of watched blocks */
-        float thr = 40.0f - 0.35f * (float)s_sens;
-        int watched = 0, changed = 0, changed_all = 0, watched_any = 0, changed_any = 0;
-        for (int i = 0; i < NB; i++) {
-            float d = cur[i] - bg[i];
-            if (d < 0) d = -d;
-            int hit = d > thr;
-            changed_all += hit;
-            int row = i / MD_COLS, outside_osd = !(row >= osd_r0 && row <= osd_r1), z = g_zone[i] && outside_osd;
-            if (outside_osd) { watched_any++; changed_any += hit; }
-            if (z) { watched++; changed += hit; }
-            g_active[i] = (uint8_t)(hit && z);
-            bg[i] += (cur[i] - bg[i]) * (hit ? 0.02f : 0.08f);       /* adapt slowly where things move */
-        }
-        g_score = changed;
-        if (changed_all > NB * 6 / 10) {                              /* light switched: not motion */
-            for (int i = 0; i < NB; i++) bg[i] = cur[i];
-            quiet_until = now + 2000; run = 0;
-            continue;
-        }
-        int need = watched * (60 - (s_sens * 56) / 100) / 1000;       /* 6% .. 0.4% */
-        if (need < 1) need = 1;
-        if (now >= quiet_until && watched && changed >= need) {
-            if (++run >= 2) { last_hit = now; if (!g_motion) { g_motion = 1; events_motion(1); } }
-        } else run = 0;
-        if (g_motion && now - last_hit > (int64_t)s_hold * 1000) { g_motion = 0; events_motion(0); }
-        /* whole picture, same rules (only wakes the frame rate) */
-        int need_any = watched_any * (60 - (s_sens * 56) / 100) / 1000;
-        if (need_any < 1) need_any = 1;
-        if (now >= quiet_until && changed_any >= need_any) { if (++run_any >= 2) { last_any = now; g_motion_any = 1; } }
-        else run_any = 0;
-        if (g_motion_any && now - last_any > (int64_t)s_hold * 1000) g_motion_any = 0;
+        cfg_build(&cfg);
+        mdl_in_t in = { now, night, watch, watch_all };
+        if (mdl_sw_frame(&st, &cfg, cur, &in, &res)) continue;       /* first frame: background only */
+        for (int i = 0; i < NB; i++) g_active[i] = res.active[i];
+        g_score = res.score;
+        md_act(&res);
     }
     return NULL;
 }
@@ -291,6 +272,15 @@ void md_init(void)
     CTRL_REG("md.ignore_osd", p_igosd, CTRL_PERSIST);
     ctrl_param_t sr = { "md.source", src_get, src_set, CTRL_PERSIST };          control_register(&sr);
     ctrl_param_t z = { "md.zones", p_zones_get, p_zones_setx, CTRL_PERSIST };   control_register(&z);
+    /* options (docs/motion.md), all off by default */
+    ctrl_param_t zs = { "md.zone_sens", p_zsens_get, p_zsens_setx, CTRL_PERSIST }; control_register(&zs);
+    CTRL_REG("md.min_size", p_minsz, CTRL_PERSIST);
+    CTRL_REG("md.persist", p_persist, CTRL_PERSIST);
+    CTRL_REG("md.light", p_light, CTRL_PERSIST);
+    ctrl_param_t ln = { "md.line", p_line_get, p_line_setx, CTRL_PERSIST };     control_register(&ln);
+    CTRL_REG("md.line_dir", p_ldir, CTRL_PERSIST);
+    CTRL_REG("md.loiter", p_loiter, CTRL_PERSIST);
+    CTRL_REG("md.loiter_zone", p_lzone, CTRL_PERSIST);
 }
 
 void md_start(void)

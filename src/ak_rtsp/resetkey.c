@@ -4,6 +4,7 @@
 #include "monotime.h"
 #include "netcfg.h"
 #include "qrwifi.h"
+#include "tls.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -41,6 +42,16 @@ static void consume_flag(const char *name, void (*action)(void), const char *wha
 
 static void do_settings_reset(void) { control_reset_settings(); }
 
+/* Login reset also undoes the HTTPS choices that can make the page hard to
+ * reach (own certificate for every connection, HTTP -> HTTPS redirect).
+ * Certificates, the camera CA and the DNS names are kept. */
+static void do_auth_reset(void)
+{
+    const char *err;
+    auth_reset();
+    if (tls_set_config(NULL, 0, 0, &err) == 0) printf("[reset] HTTPS: redirect off, camera certificate for addresses\n");
+}
+
 void resetkey_check_sd(void)
 {
     static const char *devs[] = { "/dev/mmcblk0p1", "/dev/mmcblk0" };
@@ -75,7 +86,7 @@ void resetkey_check_sd(void)
         unlink(SD_MNT "/wifi.txt");
     }
 
-    consume_flag("reset_auth", auth_reset, "resetting login to admin/admin");
+    consume_flag("reset_auth", do_auth_reset, "resetting login to admin/admin and HTTPS access");
     consume_flag("reset_settings", do_settings_reset, "deleting saved settings");
 
     sync();
@@ -140,7 +151,7 @@ static void *button_thread(void *arg)
         if (pressed_at >= 0 && !fired && now_ms() - pressed_at >= RESET_HOLD_S * 1000L) {
             fired = 1;
             printf("[reset] button held %d s\n", RESET_HOLD_S);
-            auth_reset();
+            do_auth_reset();
         }
     }
     for (int i = 0; i < n; i++) close(pf[i].fd);

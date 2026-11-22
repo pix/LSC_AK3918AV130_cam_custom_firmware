@@ -80,3 +80,6 @@ Thumbs.db
 *.a
 # flash images and dumps
 /out/
+
+# SmolRTSP checkout (see README "Prerequisite: SmolRTSP")
+src/smolrtsp/

@@ -196,6 +196,26 @@ static void publish_discovery(void)
     snprintf(e, sizeof e, "\"command_topic\":\"%s/cmd/recording\",\"state_topic\":\"%s/recording\",\"options\":[\"off\",\"motion\",\"continuous\"],\"icon\":\"mdi:record-rec\",\"entity_category\":\"config\"", B, B);
     disc("select", "recording", "SD recording", e);
     snprintf(e, sizeof e, "\"topic\":\"%s/snapshot\"", B);                                            disc("camera", "snapshot", "Last motion", e);
+    {   /* motion rules: announced while set up (md.line / md.loiter), removed otherwise */
+        char v[32] = "", t[192];
+        control_get_value("md.line", v, sizeof v, 0);
+        int line = v[0] != 0;
+        v[0] = 0;
+        control_get_value("md.loiter", v, sizeof v, 0);
+        int loiter = v[0] && strcmp(v, "0");
+        snprintf(e, sizeof e, "\"state_topic\":\"%s/line\",\"icon\":\"mdi:vector-line\"", B);
+        if (line) disc("binary_sensor", "line", "Line crossed", e);
+        snprintf(e, sizeof e, "\"state_topic\":\"%s/line_direction\",\"icon\":\"mdi:arrow-left-right\"", B);
+        if (line) disc("sensor", "line_direction", "Line crossing direction", e);
+        snprintf(e, sizeof e, "\"state_topic\":\"%s/loiter\",\"device_class\":\"occupancy\"", B);
+        if (loiter) disc("binary_sensor", "loiter", "Loitering", e);
+        static const char *const rm[][3] = { { "binary_sensor", "line", "l" }, { "sensor", "line_direction", "l" }, { "binary_sensor", "loiter", "o" } };
+        for (size_t i = 0; i < sizeof rm / sizeof rm[0]; i++)
+            if (rm[i][2][0] == 'l' ? !line : !loiter) {
+                snprintf(t, sizeof t, "homeassistant/%s/%s/%s/config", rm[i][0], g_node, rm[i][1]);
+                publish_raw(t, "", 0, 1);
+            }
+    }
 #undef B
 }
 

@@ -33,19 +33,29 @@ same decloud setup as the original project (only `bin/ak_rtsp` in the APP partit
 - **Web admin page** (port 80, HTTPS 443): live view with audio and push-to-talk, snapshot, image settings,
   day/night and IR, overlay, motion zones, recordings browser, Wi-Fi (with rollback), time/NTP,
   health, settings backup/restore, optional development terminal.
-- **HTTPS and RTSPS** (port 322) with an on-camera CA or your own certificate; reverse proxy support
-  (Traefik, see `docs/ak_rtsp-auth/traefik.md`).
-- **Streams:** 1080p main stream and a 640x360 sub stream (`/sub`), up to 4 RTSP/RTSPS sessions.
+- **HTTPS and RTSPS** (port 322) with an on-camera CA, your own uploaded certificate (DNS names or IP
+  addresses) or a Let's Encrypt / ACME certificate renewed by the camera (DNS-01 via Cloudflare, DuckDNS or
+  acme-dns, or HTTP-01), see [`https-certificates.md`](docs/ak_rtsp-auth/https-certificates.md); reverse proxy
+  support (Traefik, see `docs/ak_rtsp-auth/traefik.md`).
+- **Streams:** 1080p main stream and a 640x360 sub stream (`/sub`), up to 4 RTSP/RTSPS sessions; optional
+  **HLS** (Safari, hls.js, VLC, smart TVs) and **casting to a Chromecast / Android TV started by the camera
+  itself**, so it works from any browser, Firefox included ([`hls.md`](docs/ak_rtsp-auth/hls.md)).
 - **Burned-in overlay:** date/time, day/night tag, frame rate and custom text drawn by the ISP.
 - **Less storage:** adaptive frame rate (idle at 10/5/3 fps, full rate on motion in the zones or anywhere,
   about 70% less at 5 fps), smart encoding (long GOP / long-term reference), H.264 High profile.
 - **Picture:** brightness, contrast, saturation and sharpness behave like the stock app (re-derived from its
   disassembly), plus WDR, noise reduction strength, anti-flicker, flip/mirror and privacy masks.
 - **Day/night:** stock soft photosensor algorithm or exposure-based, IR LED auto/on/off, light level.
-- **Events:** motion (software or ISP statistics, zones), sound level, tamper (covered/moved),
-  delivered to MQTT (Home Assistant discovery, TLS with pinning or client certificates), a webhook and ONVIF.
+- **Events:** motion (software or ISP statistics, zones, minimum object size, persistence, light-change
+  rejection, line crossing, loitering: [`motion.md`](docs/ak_rtsp-auth/motion.md)), sound level, tamper
+  (covered/moved), delivered to MQTT (Home Assistant discovery, TLS with pinning or client certificates), a
+  webhook and ONVIF.
+- **Push notifications** with the snapshot and an optional short video clip: ntfy, Telegram, Pushover, Discord
+  (webhook or bot) and Gotify, with a per-time-window limit
+  ([`notifications.md`](docs/ak_rtsp-auth/notifications.md)).
 - **ONVIF** (Profile S subset): discovery, media profiles, snapshot, imaging, events (PullPoint),
-  audio back-channel; checked against what Home Assistant's ONVIF integration does.
+  audio back-channel; checked against what Home Assistant's ONVIF integration does. Optional **Profile G**:
+  NVRs can search and replay the SD recordings ([`onvif-profile-g.md`](docs/ak_rtsp-auth/onvif-profile-g.md)).
 - **SD card recording:** continuous or event-based fragmented MP4, pre/post-event buffer, timelapse, weekly
   schedules, privacy hours, retention by free space and age.
 - **Speaker:** chimes, custom sound, webhook-triggered sounds, talk-back from the browser.
@@ -384,6 +394,15 @@ dotnet run -c Release
 - [Camera ISP, Audio & Div0 Fix Architecture](docs/camera_and_audio_pipeline.md)
 - [Serial Console & Live Camera Tuning App Guide](docs/serial_console_and_camera_tuning.md)
 - [Building Your Own Firmware From Your Own Dump](docs/building_your_own_firmware.md)
+
+This fork's `ak_rtsp`:
+- [Testing, flashing safely, hardware facts](TESTING.md)
+- [HTTPS certificates: camera CA, your own certificate, ACME](docs/ak_rtsp-auth/https-certificates.md)
+- [Motion detection](docs/ak_rtsp-auth/motion.md)
+- [Push notifications](docs/ak_rtsp-auth/notifications.md)
+- [HLS and casting](docs/ak_rtsp-auth/hls.md)
+- [ONVIF Profile G (recording search and replay)](docs/ak_rtsp-auth/onvif-profile-g.md)
+- [Behind a reverse proxy (Traefik)](docs/ak_rtsp-auth/traefik.md)
 
 ---
 

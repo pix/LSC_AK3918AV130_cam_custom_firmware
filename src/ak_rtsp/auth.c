@@ -292,9 +292,16 @@ static struct { char key[33]; uint32_t max_nc, seen; uint32_t used; } g_nc[NC_SL
 /* 1 = first use of this nc for this nonce + cnonce, 0 = replay / too old */
 static int nc_fresh(const char *nonce, const char *cnonce, const char *nc_hex)
 {
-    char *end;
-    unsigned long nc = strtoul(nc_hex, &end, 16);
-    if (*end || nc == 0 || strlen(nc_hex) != 8) return 0;
+    /* exactly 8 hex digits (RFC 7616): strtoul would also take "-0000001"
+     * (= ULONG_MAX, a replay on 64-bit builds; found by fuzzing) */
+    if (strlen(nc_hex) != 8) return 0;
+    uint32_t nc = 0;
+    for (int i = 0; i < 8; i++) {
+        int c = (unsigned char)nc_hex[i];
+        if (!isxdigit(c)) return 0;
+        nc = nc << 4 | (uint32_t)(isdigit(c) ? c - '0' : (tolower(c) - 'a' + 10));
+    }
+    if (nc == 0) return 0;
     char key[33];
     {
         md5_ctx c; uint8_t d[16];

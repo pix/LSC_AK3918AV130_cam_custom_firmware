@@ -113,6 +113,8 @@ int record_path(const char *day, const char *name, char *out, size_t cap)
     return 0;
 }
 
+int record_day_ok(const char *day) { return is_day(day); }
+
 static int cmpstr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
 /* Delete the oldest files until keep_free MB (and 3% of the card) are free. */

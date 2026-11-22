@@ -9,6 +9,8 @@
 #include "netcfg.h"
 #include "qrwifi.h"
 #include "live.h"
+#include "hls.h"
+#include "cast.h"
 #include "sha1.h"
 #include "speaker.h"
 #include "osd.h"
@@ -23,6 +25,8 @@
 #include "rtsp.h"
 #include <fcntl.h>
 #include "mqtt.h"
+#include "acme.h"
+#include "notify.h"
 #include "md.h"
 #include "tamper.h"
 #include "substream.h"
@@ -85,7 +89,9 @@ typedef struct {
 
 #define HOOK_MAX_BODY (768 * 1024)
 #ifndef HOOK_TOKEN_FILE
+#ifndef HOOK_TOKEN_FILE
 #define HOOK_TOKEN_FILE "/etc/config/ak_rtsp_hook"
+#endif
 #endif
 
 /* /api/osd: settings plus the burned-in (video) overlay state. */
@@ -222,8 +228,10 @@ static int read_request_buf(conn_t *cn, req_t *r, char *buf)
         /* only webhook uploads may be large */
         if ((strncmp(r->path, "/hook/", 6) != 0 && strncmp(r->path, "/api/mqtt/upload", 16) != 0 &&
              strncmp(r->path, "/onvif/", 7) != 0 && strncmp(r->path, "/api/rec/", 9) != 0 &&
-             strncmp(r->path, "/api/restore", 12) != 0) ||
-            want > HOOK_MAX_BODY || (!strncmp(r->path, "/onvif/", 7) && want > 16384)) return -1;
+             strncmp(r->path, "/api/restore", 12) != 0 && strncmp(r->path, "/api/tls/custom", 15) != 0 &&
+             strncmp(r->path, "/api/acme/ca", 12) != 0) ||
+            want > HOOK_MAX_BODY || (!strncmp(r->path, "/onvif/", 7) && want > 16384) ||
+            ((!strncmp(r->path, "/api/tls/custom", 15) || !strncmp(r->path, "/api/acme/ca", 12)) && want > 32768)) return -1;
         r->big = malloc(want + 1);
         if (!r->big) return -1;
         size_t got = have_body > want ? want : have_body;
@@ -801,6 +809,17 @@ static int handle_conn(conn_t *cn, req_t *in, const struct sockaddr *peer)
         return 0;
     }
 
+    /* ACME http-01: the CA fetches http://<name>/.well-known/acme-challenge/<token>
+     * with no login, for a name this camera may not know yet. Only tokens of
+     * an issuance in progress exist; anything else is 404. */
+    if (is_get && !strncmp(path, "/.well-known/acme-challenge/", 28)) {
+        char ka[256];
+        int n = strlen(path + 28) < 128 ? acme_http01(path + 28, ka, sizeof ka) : -1;
+        if (n > 0) respond(cn, 200, "OK", "application/octet-stream", NULL, ka, (size_t)n);
+        else respond_text(cn, 404, "Not Found", "no such challenge\n");
+        return 0;
+    }
+
     if (!r.via_proxy && strncmp(path, "/hook/", 6) != 0 && strncmp(path, "/onvif/", 7) != 0 && !host_allowed(r.host)) {
         respond_text(cn, 421, "Misdirected Request",
                      "unknown host name; add it to web.hosts (Security tab) to use it\n");
@@ -820,6 +839,12 @@ static int handle_conn(conn_t *cn, req_t *in, const struct sockaddr *peer)
         respond(cn, 301, "Moved Permanently", "text/plain; charset=utf-8", loc, "HTTPS\n", 6);
         return 0;
     }
+
+    /* HLS (media players): a token in the path instead of Digest. Host check
+     * and redirect above apply; hls_serve() runs after g_web_lock is
+     * released (serve()), so waiting for segments / sending them never
+     * holds up other requests. */
+    if (is_get && !strncmp(path, "/hls/", 5)) return 2;
 
     /* Live video WebSocket: authorised by a one-time token obtained through
      * an authenticated request (browsers don't reliably send Digest on WS). */
@@ -988,6 +1013,23 @@ static int handle_conn(conn_t *cn, req_t *in, const struct sockaddr *peer)
         if (live_token_new(tok) != 0) { respond_text(cn, 500, "Error", "no token\n"); return 0; }
         int n = snprintf(json, sizeof(json), "{\"token\":\"%s\"}", tok);
         respond(cn, 200, "OK", "application/json", NULL, json, (size_t)n);
+    } else if (is_get && !strcmp(path, "/api/hls/token")) {
+        char tok[33], json[160];
+        if (!r.has_xrw) { respond_text(cn, 403, "Forbidden", "missing X-Requested-With\n"); return 0; }
+        if (!hls_enabled()) { respond_text(cn, 403, "Forbidden", "HLS is off (hls.enabled)\n"); return 0; }
+        if (hls_token_new(tok) != 0) { respond_text(cn, 500, "Error", "no token\n"); return 0; }
+        int n = snprintf(json, sizeof(json), "{\"token\":\"%s\",\"url\":\"/hls/%s/index.m3u8\"}", tok, tok);
+        respond(cn, 200, "OK", "application/json", NULL, json, (size_t)n);
+    } else if (is_get && !strcmp(path, "/api/hls")) {
+        char json[512];
+        int n = hls_status_json(json, sizeof(json));
+        respond(cn, 200, "OK", "application/json", NULL, json, (size_t)n);
+    } else if (!strncmp(path, "/api/hls/cast", 13)) {          /* cast.c: the camera casts to a Chromecast */
+        char host[48] = "", port[8] = "", json[2048];
+        form_get(r.body, "host", host, sizeof(host));
+        form_get(r.body, "port", port, sizeof(port));
+        int code = cast_api(is_post, path + 13, host, atoi(port), json, sizeof(json));
+        respond(cn, code, code < 300 ? "OK" : "Error", "application/json", NULL, json, strlen(json));
     } else if (is_get && !strcmp(path, "/api/term/token")) {
         char tok[33], json[64];
         if (!term_enabled()) { respond_text(cn, 403, "Forbidden", "the development terminal is off\n"); return 0; }
@@ -1000,7 +1042,7 @@ static int handle_conn(conn_t *cn, req_t *in, const struct sockaddr *peer)
         h_json(cn, net_status_json);
     } else if (is_get && !strcmp(path, "/api/config")) {
         /* registered settings; ?prefix=mqtt. (secrets masked) */
-        static char json[6144];
+        static char json[16384];                     /* ~110 settings; values up to CTRL_VALUE_MAX */
         char prefix[32] = "";
         const char *qs = strchr(r.path, '?');
         if (qs) form_get(qs + 1, "prefix", prefix, sizeof(prefix));
@@ -1015,10 +1057,12 @@ static int handle_conn(conn_t *cn, req_t *in, const struct sockaddr *peer)
             char *eq = strchr(kv, '=');
             if (!eq) continue;
             *eq = 0;
-            char name[48], value[300];
+            /* whole values: settings go up to CTRL_VALUE_MAX - 1 characters, each may
+             * arrive %-encoded (3 bytes); value[300] cut long ones (acme.domains) */
+            char name[48], value[CTRL_VALUE_MAX];
             if (strlen(kv) >= sizeof(name)) { respond_text(cn, 400, "Bad Request", "bad name"); return 0; }
             snprintf(name, sizeof(name), "%s", kv);
-            char one[400];
+            char one[3 * CTRL_VALUE_MAX + 4];
             snprintf(one, sizeof(one), "v=%s", eq + 1);          /* reuse form_get's URL decoding */
             if (!form_get(one, "v", value, sizeof(value))) value[0] = 0;
             const char *err = "invalid";
@@ -1054,7 +1098,7 @@ static int handle_conn(conn_t *cn, req_t *in, const struct sockaddr *peer)
         if (!host[0]) control_get_value("mqtt.host", host, sizeof(host), 0);
         if (!host[0]) { respond_text(cn, 400, "Bad Request", "enter the broker address first"); return 0; }
         int fd = mqtt_open_tcp(host, atoi(port), err, sizeof(err));
-        static char json[6144];
+        static char json[16384];                     /* the broker's chain described (up to 8 certificates) */
         int n = fd < 0 ? -1 : tls_mqtt_fetch(fd, host, json, sizeof(json), err, sizeof(err));
         if (n < 0) respond_text(cn, 502, "Bad Gateway", err[0] ? err : "cannot reach the broker");
         else respond(cn, 200, "OK", "application/json", NULL, json, (size_t)n);
@@ -1266,15 +1310,46 @@ static int handle_conn(conn_t *cn, req_t *in, const struct sockaddr *peer)
         if (n <= 0) respond_text(cn, 404, "Not Found", "no certificate yet\n");
         else respond(cn, 200, "OK", ctype, disp, pem, (size_t)n);
     } else if (is_post && !strcmp(path, "/api/tls")) {
-        char names[1100] = "", red[4] = "";
+        char names[1100] = "", red[4] = "", all[4] = "";
         const char *err;
         int have_names = form_get(r.body, "names", names, sizeof(names));
         int redirect = form_get(r.body, "redirect", red, sizeof(red)) ? red[0] == '1' : -1;
-        if (tls_set_config(have_names ? names : NULL, redirect, &err) != 0) {
+        int custom_all = form_get(r.body, "custom_all", all, sizeof(all)) ? all[0] == '1' : -1;
+        if (tls_set_config(have_names ? names : NULL, redirect, custom_all, &err) != 0) {
             respond_text(cn, 400, "Bad Request", err);
             return 0;
         }
         h_json(cn, tls_info_json);
+    } else if (is_post && (!strcmp(path, "/api/tls/custom") || !strcmp(path, "/api/acme/ca"))) {
+        /* raw PEM body. Custom certificate: chain (server certificate first)
+         * + unencrypted key, e.g. cat fullchain.pem privkey.pem | curl --data-binary @-.
+         * ACME CA: one CA certificate; an empty body removes it. */
+        const char *body = r.big ? (const char *)r.big : r.body;
+        size_t n = r.big ? r.big_len : r.body_len;
+        const char *err = "";
+        int rc = !strcmp(path, "/api/acme/ca") ? tls_acme_ca_set(body, n, &err) : tls_custom_install(body, n, "upload", &err);
+        if (r.big) { memset(r.big, 0, r.big_len); free(r.big); r.big = NULL; r.big_len = 0; }
+        memset(r.body, 0, sizeof r.body);
+        if (rc != 0) respond_text(cn, 400, "Bad Request", err);
+        else if (!strcmp(path, "/api/acme/ca")) h_json(cn, acme_status_json);
+        else h_json(cn, tls_info_json);
+    } else if (is_post && !strcmp(path, "/api/tls/custom/clear")) {
+        tls_custom_clear();
+        h_json(cn, tls_info_json);
+    } else if (is_get && !strcmp(path, "/api/notify")) {
+        h_json(cn, notify_status_json);
+    } else if (is_post && !strcmp(path, "/api/notify/test")) {
+        char err[200];                           /* only queued: the sender thread does the network */
+        if (notify_test(err, sizeof err) != 0) respond_text(cn, 409, "Conflict", err);
+        else respond_text(cn, 202, "Accepted", "queued\n");
+    } else if (is_get && !strcmp(path, "/api/acme")) {
+        h_json(cn, acme_status_json);
+    } else if (is_post && !strcmp(path, "/api/acme/run")) {
+        acme_run_now();
+        respond_text(cn, 202, "Accepted", "started\n");
+    } else if (is_post && !strcmp(path, "/api/acme/register")) {
+        acme_dns_register_start();               /* network in the ACME thread, not here */
+        respond_text(cn, 202, "Accepted", "registering\n");
     } else if (is_post && !strcmp(path, "/api/tls/regenerate-ca")) {
         const char *err;
         if (tls_regenerate_ca(&err) != 0) respond_text(cn, 500, "Error", err);
@@ -1391,10 +1466,11 @@ static void serve(conn_t *cn)
     }
     pthread_mutex_lock(&g_web_lock);
     g_penalty = 0;
-    int handed_off = handle_conn(cn, rq, (const struct sockaddr *)&peer);   /* 1 = handed to a live viewer thread */
+    int handed_off = handle_conn(cn, rq, (const struct sockaddr *)&peer);   /* 1 = handed to a live viewer thread, 2 = HLS */
     int penalty = g_penalty;
     g_peer = NULL;
     pthread_mutex_unlock(&g_web_lock);
+    if (handed_off == 2) { hls_serve(cn, rq->path); handed_off = 0; }   /* outside g_web_lock */
     free(rq->big); free(rq);
     if (penalty) sleep(1);                     /* failed login: slows this client only */
     if (!handed_off) conn_close(cn);

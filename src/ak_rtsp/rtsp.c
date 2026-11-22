@@ -86,6 +86,7 @@ static uint8_t linear_to_ulaw(int16_t pcm)
 #include "auth.h"
 #include "live.h"
 #include "conn.h"
+#include "replay.h"
 #include <stdarg.h>
 #include <strings.h>
 
@@ -138,6 +139,8 @@ typedef struct {
     int64_t       bc_last_ms;
     live_cursor_t cur;
     uint32_t      audio_rtp_ts;
+    /* ONVIF replay (rtsp://camera/replay/<token>, replay.c): set by DESCRIBE */
+    replay_t     *replay;
 
     /* Digest auth state (see Client_before). */
     bool   authed;
@@ -161,6 +164,8 @@ static void Client_drop(VSelf) {
         VTABLE(SmolRTSP_RtpTransport, SmolRTSP_Droppable).drop(self->audio_rtp_transport);
     if (self->audio_rtp_udp_fd >= 0) close(self->audio_rtp_udp_fd);
     if (self->audio_rtcp_udp_fd >= 0) close(self->audio_rtcp_udp_fd);
+    replay_close(self->replay);
+    self->replay = NULL;
 }
 
 impl(SmolRTSP_Droppable, Client);
@@ -292,13 +297,60 @@ static uint64_t session_id_new(void)
 
 static void Client_options(VSelf, SmolRTSP_Context *ctx, const SmolRTSP_Request *req) {
     VSELF(Client);
-    (void)self; (void)req;
-    smolrtsp_header(ctx, SMOLRTSP_HEADER_PUBLIC, "DESCRIBE, SETUP, PLAY, TEARDOWN");
+    (void)self;
+    smolrtsp_header(ctx, SMOLRTSP_HEADER_PUBLIC, "%s", replay_is_uri(CharSlice99_alloca_c_str(req->start_line.uri))
+                    ? "DESCRIBE, SETUP, PLAY, PAUSE, TEARDOWN" : "DESCRIBE, SETUP, PLAY, TEARDOWN");
     smolrtsp_respond_ok(ctx);
+}
+
+/* ---- ONVIF replay: rtsp://camera/replay/<recording token> (replay.c sends the media) ---- */
+static void describe_replay(Client *self, SmolRTSP_Context *ctx, const char *uri) {
+    replay_close(self->replay);
+    self->replay = NULL;
+    if (self->rtp_transport || self->audio_rtp_transport) {
+        smolrtsp_respond(ctx, SMOLRTSP_STATUS_METHOD_NOT_VALID_IN_THIS_STATE, "session already set up");
+        return;
+    }
+    char *sdp = malloc(2048);
+    if (!sdp) { smolrtsp_respond_internal_error(ctx); return; }
+    int st = 404;
+    const char *why = "Not Found";
+    self->replay = replay_open(uri, sdp, 2048, &st, &why);
+    if (!self->replay) {
+        smolrtsp_respond(ctx, (SmolRTSP_StatusCode)st, why);
+    } else {
+        smolrtsp_header(ctx, SMOLRTSP_HEADER_CONTENT_TYPE, "application/sdp");
+        smolrtsp_body(ctx, CharSlice99_from_str(sdp));
+        smolrtsp_respond_ok(ctx);
+    }
+    free(sdp);
+}
+
+/* header value as a C string (NULL if absent or too long) */
+static const char *header_str(const SmolRTSP_Request *req, const char *name, char *buf, size_t cap);
+
+static void play_replay(Client *self, SmolRTSP_Context *ctx, const SmolRTSP_Request *req) {
+    char rg[160], sc[32], fr[32], rc[16], rq[160], r_out[96], info[640], s_out[16];
+    const char *why = "Bad Request", *uri = CharSlice99_alloca_c_str(req->start_line.uri);
+    int st = replay_play(self->replay, header_str(req, "Range", rg, sizeof rg), header_str(req, "Scale", sc, sizeof sc),
+                         header_str(req, "Frames", fr, sizeof fr), header_str(req, "Rate-Control", rc, sizeof rc),
+                         header_str(req, "Require", rq, sizeof rq), req->cseq, strlen(uri) < 256 ? uri : "",
+                         r_out, sizeof r_out, info, sizeof info, s_out, sizeof s_out, &why);
+    if (st != 200) { smolrtsp_respond(ctx, (SmolRTSP_StatusCode)st, why); return; }
+    smolrtsp_header(ctx, SMOLRTSP_HEADER_SESSION, "%llu", (unsigned long long)self->session_id);
+    smolrtsp_header(ctx, SMOLRTSP_HEADER_RANGE, "%s", r_out);
+    if (s_out[0]) smolrtsp_header(ctx, SMOLRTSP_HEADER_SCALE, "%s", s_out);
+    smolrtsp_header(ctx, SMOLRTSP_HEADER_RTP_INFO, "%s", info);
+    smolrtsp_respond_ok(ctx);
+    self->is_playing = true;
 }
 
 static void Client_describe(VSelf, SmolRTSP_Context *ctx, const SmolRTSP_Request *req) {
     VSELF(Client);
+    {
+        const char *ru = CharSlice99_alloca_c_str(req->start_line.uri);
+        if (replay_is_uri(ru)) { describe_replay(self, ctx, ru); return; }
+    }
     char sdp_buf[1024], audio_fmt[96], bc[160] = "";
     CharSlice99 require;
     self->bc_offered = find_header_ci(req, "Require", &require) &&
@@ -384,6 +436,10 @@ static void Client_setup(VSelf, SmolRTSP_Context *ctx, const SmolRTSP_Request *r
     } else {
         if (setup_video_transport(self, ctx, req) < 0) return;
     }
+    if (self->replay)                          /* replay.c sends its own RTP on these */
+        replay_set_track(self->replay, is_audio, self->is_tcp, self->rtp_channel, self->rtcp_channel,
+                         is_audio ? self->audio_rtp_udp_fd : self->rtp_udp_fd,
+                         is_audio ? self->audio_rtcp_udp_fd : self->rtcp_udp_fd);
 
     /* Session ID must stay the same across both tracks' SETUP calls within
      * one session — only generate it once. */
@@ -394,7 +450,7 @@ static void Client_setup(VSelf, SmolRTSP_Context *ctx, const SmolRTSP_Request *r
 
 static void Client_play(VSelf, SmolRTSP_Context *ctx, const SmolRTSP_Request *req) {
     VSELF(Client);
-    (void)req;
+    if (self->replay) { play_replay(self, ctx, req); return; }
     self->is_playing = true;
     if (!self->subscribed) { live_subscribe(); self->subscribed = true; }
     smolrtsp_header(ctx, SMOLRTSP_HEADER_RANGE, "npt=now-");
@@ -405,12 +461,21 @@ static void Client_teardown(VSelf, SmolRTSP_Context *ctx, const SmolRTSP_Request
     VSELF(Client);
     (void)req;
     self->is_playing = false;
+    replay_close(self->replay);                /* frees the replay slot */
+    self->replay = NULL;
     smolrtsp_respond_ok(ctx);
 }
 
 static void Client_unknown(VSelf, SmolRTSP_Context *ctx, const SmolRTSP_Request *req) {
     VSELF(Client);
-    (void)self; (void)req;
+    SmolRTSP_Method pause = SMOLRTSP_METHOD_PAUSE;
+    if (self->replay && SmolRTSP_Method_eq(&req->start_line.method, &pause)) {
+        replay_pause(self->replay);
+        self->is_playing = false;
+        smolrtsp_header(ctx, SMOLRTSP_HEADER_SESSION, "%llu", (unsigned long long)self->session_id);
+        smolrtsp_respond_ok(ctx);
+        return;
+    }
     smolrtsp_respond(ctx, SMOLRTSP_STATUS_METHOD_NOT_ALLOWED, "Method Not Allowed");
 }
 
@@ -425,6 +490,14 @@ static bool find_header_ci(const SmolRTSP_Request *req, const char *name, CharSl
         }
     }
     return false;
+}
+
+static const char *header_str(const SmolRTSP_Request *req, const char *name, char *buf, size_t cap) {
+    CharSlice99 v;
+    if (!find_header_ci(req, name, &v) || v.len >= cap) return NULL;
+    memcpy(buf, v.ptr, v.len);
+    buf[v.len] = '\0';
+    return buf;
 }
 
 static SmolRTSP_ControlFlow Client_before(VSelf, SmolRTSP_Context *ctx,
@@ -981,6 +1054,12 @@ static void handle_client_inner(conn_t *cn, struct sockaddr_storage *client_addr
                 buf_len += n;
                 buf[buf_len] = '\0';
 
+              /* Everything complete in the buffer is handled now: interleaved
+               * frames, then requests one after the other (a client may send
+               * the next request before the answer: it used to wait for more
+               * data, up to the 60 s idle drop). */
+              bool drop = false;
+              for (;;) {
                 /* Interleaved binary frames from the client ($ ch len16 data):
                  * backchannel audio, or RTCP receiver reports (ignored). */
                 size_t pos = 0;
@@ -997,13 +1076,17 @@ static void handle_client_inner(conn_t *cn, struct sockaddr_storage *client_addr
                     buf_len -= pos;
                     buf[buf_len] = '\0';
                 }
-                if (!buf_len || buf[0] == '$') continue;   /* rest of a frame still to come */
+                if (!buf_len || buf[0] == '$') break;      /* rest of a frame still to come */
+                /* Parse only once the headers are complete: SmolRTSP reads one
+                 * byte past a request cut right after "RTSP/" (it then hits our
+                 * NUL and rejects a request that was merely split by TCP). */
+                if (!memmem(buf, buf_len, "\r\n\r\n", 4)) break;   /* memmem: a NUL in garbage must not hide it */
 
                 SmolRTSP_Request req = SmolRTSP_Request_uninit();
                 CharSlice99 input = CharSlice99_new(buf, buf_len);
                 SmolRTSP_ParseResult res = SmolRTSP_Request_parse(&req, input);
 
-                bool should_consume = false;
+                bool should_consume = false, failed = false;
                 size_t bytes_to_consume = 0;
 
                 match(res) {
@@ -1018,29 +1101,46 @@ static void handle_client_inner(conn_t *cn, struct sockaddr_storage *client_addr
                     }
                     of(SmolRTSP_ParseResult_Failure, err) {
                         (void)err;
-                        printf("[ak_rtsp] Request parse failed (%zu bytes buffered)\n",
-                               buf_len);
-                        buf_len = 0;
+                        failed = true;
                     }
                 }
 
-                if (should_consume) {
-                    smolrtsp_dispatch(writer, controller, &req);
-                    if (client.auth_failures >= 5) {
-                        printf("[ak_rtsp] too many auth failures, dropping client\n");
-                        break;
-                    }
-                    if (bytes_to_consume < buf_len) {
-                        memmove(buf, buf + bytes_to_consume, buf_len - bytes_to_consume);
-                        buf_len -= bytes_to_consume;
-                    } else {
-                        buf_len = 0;
-                    }
+                if (failed) {
+                    /* drop the bad request only (through the first blank line):
+                     * a valid one queued behind it is still answered */
+                    const char *e = memmem(buf, buf_len, "\r\n\r\n", 4);
+                    size_t skip = e ? (size_t)(e - buf) + 4 : buf_len;
+                    printf("[ak_rtsp] Request parse failed (%zu of %zu bytes dropped)\n", skip, buf_len);
+                    memmove(buf, buf + skip, buf_len - skip);
+                    buf_len -= skip;
+                    buf[buf_len] = '\0';
+                    continue;
                 }
+                if (!should_consume) break;                /* body still to come */
+                smolrtsp_dispatch(writer, controller, &req);
+                if (client.auth_failures >= 5) {
+                    printf("[ak_rtsp] too many auth failures, dropping client\n");
+                    drop = true;
+                    break;
+                }
+                if (bytes_to_consume < buf_len) {
+                    memmove(buf, buf + bytes_to_consume, buf_len - bytes_to_consume);
+                    buf_len -= bytes_to_consume;
+                } else {
+                    buf_len = 0;
+                }
+                buf[buf_len] = '\0';
+              }
+              if (drop) break;
             }
         }
 
-        if (client.is_playing && client.sub) {
+        if (client.is_playing && client.replay) {
+            /* SD recording (replay.c): sends what is due, paced, waits <= 20 ms */
+            int r = replay_step(client.replay, cn);
+            if (r == 1) { client.is_playing = false; last_req = mono_s(); }   /* end: BYE sent, session open 60 s */
+            else if (r < 0 && client.is_tcp) { printf("[ak_rtsp] replay client stopped receiving, closing\n"); break; }
+        } else if (client.is_playing && client.sub) {
             /* second stream: video from substream.c, audio from the hub */
             if (!subbuf) subbuf = malloc(SUB_FRAME_MAX);
             int key = 0; uint64_t ts = 0;

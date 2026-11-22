@@ -1,0 +1,17 @@
+# glibc, not the firmware: a thread that used getaddrinfo() and is still alive at
+# exit keeps its resolver configuration only through glibc's global table, which
+# valgrind's __libc_freeres frees at exit -> "definitely lost". Reproduced with a
+# 10-line program (thread: getaddrinfo("localhost") then sleep; main: exit(0));
+# gone with --run-libc-freeres=no. The notify sender thread never exits.
+{
+   glibc-resolv-conf-freeres-with-live-thread
+   Memcheck:Leak
+   match-leak-kinds: definite
+   fun:malloc
+   fun:__libc_alloc_buffer_allocate
+   ...
+   fun:__resolv_conf_allocate
+   fun:__resolv_conf_load
+   fun:__resolv_conf_get_current
+   fun:__res_vinit
+}

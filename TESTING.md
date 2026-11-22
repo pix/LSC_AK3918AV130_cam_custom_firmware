@@ -13,6 +13,35 @@ write failure → restore). Other harnesses: `tests/host_main.c` (web/auth/setti
 `tests/osd/test_osd_render.c` (overlay renderer → PGM files), `tests/aec/run.sh` (echo canceller on simulated
 streams: two clocks, late reads, echo path gain, double talk).
 
+### The whole firmware on the PC: sanitizers, valgrind, fuzzing
+Everything that does not touch the hardware also runs on the PC: `tests/host/build_host.sh <dir> asan|valgrind|fuzz`
+builds the web server, RTSP, ONVIF, TLS/ACME, MQTT, events, notifications, recording, HLS/cast, motion logic,
+backup… with the hardware (sensor, encoder, ISP, audio, IR, LEDs) stubbed by `tests/host/hw_stubs.c`: frames
+come from a test H.264 file, audio is a synthetic camera-like stream. Paths (`/etc/config`, the SD card) are
+redirected into the build directory, and `system()` / `popen()` / `reboot()` / `mount()` are wrapped so nothing
+touches the PC.
+`tests/host/run_sandboxed.sh <dir> <video.h264> <log> [valgrind] -- <command>` starts that server in
+unprivileged namespaces (own network: the camera is 10.99.0.1, own process tree, tmpfs SD card), runs the test
+command against it, stops it with SIGTERM and appends the ASan/LSan/valgrind verdict to the log.
+
+| Suite | What it covers |
+|---|---|
+| `tests/host/sweep.sh <fixtures> <venv>` | every endpoint and setting (valid and invalid), uploads, backup/restore, RTSP/RTSPS TCP+UDP, WebSocket live view + talk-back, ONVIF + Home Assistant checks, MQTT, recordings |
+| `tests/host/netfuzz.py`, `rtsp_edge.py` | malformed HTTP/RTSP for minutes (server must survive); RTSP pipelining, split requests, garbage then a valid request |
+| `tests/tls/acme/run.sh` (`VALGRIND=1`) | own-certificate checks (wrong key, chain order, expired, CA, key types and sizes…), certificate selection by SNI/IP, ACME against Pebble and mock DNS APIs |
+| `tests/motion/run.sh` | `md_logic.c` against the old decision, synthetic scenes for every option, line crossing / loitering replay |
+| `tests/notify/run.sh <dir> asan\|valgrind` | ntfy / Telegram / Pushover / Discord / Gotify against local stand-ins: limits, pictures, clips, failures |
+| `tests/hls/run.sh <dir> <video> <work> [valgrind]` | playlists/segments, tokens, concurrent clients, HTTPS, casting to a fake Chromecast (start-up time, live edge) |
+| `tests/onvif/profile_g.sh <dir> <video> <venv> [valgrind]` | Profile G search/replay with onvif-zeep-async, RTSP replay with ffmpeg |
+| `tests/fuzz/*.c` + `build_fuzzer.sh` | libFuzzer harnesses for every parser: HTTP requests and handlers, Digest, RTSP, ONVIF (S and G), MQTT, PEM, backup archives, fMP4 muxer/reader, HLS paths, notifications, motion settings, QR, WAV, OSD… |
+
+Inputs: a test clip (`ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=15 -t 12 -c:v libx264 -g 30 -bf 0
+-bsf:v h264_metadata=aud=insert -f h264 video.h264`), certificates from `tests/tls/acme/gen_fixtures.sh <dir>`,
+and a Python venv with `onvif-zeep-async` and `websockets`.
+Expected on the PC: `POST /api/npu/test` answers 500 (no NPU in the stubs). Bugs found this way (heap overflow
+in the certificate upload, stale host names, RTSP pipelining, several integer overflows in parsers, a settings
+save that could drop values) are fixed; third-party SpeexDSP and quirc still have UBSan arithmetic reports.
+
 ## 2. Trying a build on the camera without flashing
 1. Append `tools/dev/sd_hook_append.sh` to the decloud SD card's `hack.sh` once.
 2. `CAMERA_IP=… tools/dev/deploy_test.sh src/ak_rtsp/ak_rtsp v1` pushes the binary to `/tmp/sd/maint/`,
@@ -105,3 +134,8 @@ they take the camera address as first argument or `CAMERA_IP`.
 - Hardware JPEG is not used (stock only encodes 640×360 that way; snapshots are software JPEG of the sub frame).
 - Wi-Fi AP fallback is disabled: the atbm driver lacks the management-frame support hostapd needs.
 - Firmware update from the web page is intentionally not provided; flash over the SD card as above.
+- RTSP over UDP: ffmpeg sometimes warns once about a non-monotonic audio timestamp (one 32 ms packet) when the
+  first RTCP Sender Report arrives; it corrects it and plays on. TCP is not affected.
+- The sensor is 1920×1080 at most (GC20C3): there is no 2K mode to unlock.
+- Casting: the receiver keeps about 3 HLS segments of delay (6-8 s at the default GOP); use the live view or RTSP
+  for real time.
