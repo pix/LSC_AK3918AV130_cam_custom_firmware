@@ -249,6 +249,38 @@ Only after the wizard has confirmed success should the camera be power-cycled.
 
 ---
 
+## 🔄 Updating a camera (`--update`)
+
+A camera that already runs this firmware is updated without redoing the installation: no Wi-Fi setup, no
+backup stage, settings kept (Wi-Fi, login, image settings and recordings are not in the APP partition).
+
+```bash
+bash /tmp/lsc-decloud-wizard.sh --update      # or ./install.sh --update from a checkout
+```
+
+1. Pick the camera (the ones installed or updated from this computer are listed) or name another one.
+2. The wizard fetches and builds the newest firmware, as for an installation.
+3. Maintenance access, two choices:
+   - **the camera already has a maintenance SD card in** (the card from the installation, which still opens
+     the maintenance port 24), or
+   - **make a new maintenance SD card**: the wizard erases a card and writes a minimal one that only opens
+     port 24 (no Wi-Fi change, no backup stage, no vendor settings). Insert it, power-cycle, wait 45 s.
+4. The wizard copies the camera's current firmware to this computer over the LAN (checksum-verified; kept in
+   the camera's backup folder as `before_update_<date>`), checks it is an ak_rtsp build (a stock camera needs
+   the full installation), and builds the new image from this camera's stock backup if this computer has it,
+   else from that current firmware.
+5. It sends the image, `flash_tool` and `camera/decloud_update.sh` to the SD card (checksum-verified), asks
+   once more, then the camera-side script: checks the exact flash layout, the image checksum and squashfs
+   header, that the APP is still exactly the one read in step 4, backs it up to the SD card
+   (`update/mtd7_before_<md5>.bin`), writes with per-block verification, checks the whole partition, and
+   restores the backup automatically if anything does not verify.
+6. The camera restarts; the wizard waits for the web page and RTSP.
+
+Remove the maintenance card afterwards: while it is in the camera, port 24 is a root shell without a password
+for anyone on your network.
+
+---
+
 ## 💡 Stage 1 notes
 
 During the first camera boot with the prepared SD card:

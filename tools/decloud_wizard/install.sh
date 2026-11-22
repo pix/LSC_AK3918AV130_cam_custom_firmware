@@ -210,13 +210,13 @@ BANNER
 ensure_wizard_assets() {
     local missing=0 f
     mkdir -p "$SELF_DIR/camera"
-    for f in decloud_stage1.sh decloud_flash.sh; do
+    for f in decloud_stage1.sh decloud_flash.sh decloud_update.sh; do
         [[ -s "$SELF_DIR/camera/$f" ]] || missing=1
     done
     (( missing == 0 )) && return 0
     info "Downloading the wizard helper files..."
     command -v curl >/dev/null 2>&1 || die "curl is required for the one-line installer."
-    for f in decloud_stage1.sh decloud_flash.sh; do
+    for f in decloud_stage1.sh decloud_flash.sh decloud_update.sh; do
         curl -fsSL --retry 3 "$RAW_BASE/camera/$f" -o "$SELF_DIR/camera/$f" \
             || die "Could not download $f from $GITHUB_REPO."
         chmod +x "$SELF_DIR/camera/$f"
@@ -935,8 +935,11 @@ patch_native_linux_build() {
 build_firmware() {
     info "Building the cloud-free RTSP firmware from YOUR camera backup..."
     info "The first Zig build can take several minutes on older computers; later builds can reuse its compiler cache."
-    local backup_path akdir smol app_extract outdir
-    backup_path="$(cat "$LATEST_BACKUP_FILE")"
+    local base_app akdir smol app_extract outdir
+    # BUILD_BASE_APP: the APP image to start from (update mode: the stock
+    # backup if this computer has it, else the camera's current APP); default:
+    # the Stage 1 stock backup.
+    base_app="${BUILD_BASE_APP:-$(cat "$LATEST_BACKUP_FILE")/mtdblock7.bin}"
     akdir="$SRC_DIR/firmware/src/ak_rtsp"
     smol="$SRC_DIR/firmware/src/smolrtsp"
     app_extract="$CAMERA_BUILD_DIR/app_extracted"
@@ -958,8 +961,8 @@ build_firmware() {
     file "$akdir/flash_tool" | grep -q 'statically linked' || die "flash_tool is not statically linked."
     rm -rf "$app_extract" "$outdir"
     mkdir -p "$outdir" #removed "$app_extract" since unsquashfs doesn't override existing dirs
-    unsquashfs -d "$app_extract" "$backup_path/mtdblock7.bin" >/dev/null \
-        || die "Could not unpack the stock APP partition."
+    unsquashfs -d "$app_extract" "$base_app" >/dev/null \
+        || die "Could not unpack the APP partition image $base_app."
 
     APP_EXTRACTED="$app_extract" FW_DIR="$outdir" bash "$akdir/build_firmware.sh" \
         || die "Firmware packaging failed."
@@ -967,12 +970,15 @@ build_firmware() {
     fw="$(find "$outdir" -maxdepth 1 -type f -name 'ak_rtsp_firmware_*.squashfs' | sort | tail -n1)"
     [[ -n "$fw" && -f "$fw" ]] || die "No firmware image was produced."
     [[ "$(stat -c%s "$fw")" -eq "$EXPECTED_APP_SIZE" ]] || die "Firmware image has the wrong size."
-    mkdir -p "$MOUNT_DIR/custom_firmware"
-    rm -f "$MOUNT_DIR/custom_firmware/ak_rtsp_firmware_"*.squashfs
-    cp "$fw" "$MOUNT_DIR/custom_firmware/"
-    cp "$akdir/flash_tool" "$MOUNT_DIR/flash_tool"
-    chmod +x "$MOUNT_DIR/flash_tool"
-    sync
+    BUILT_FIRMWARE="$fw"
+    if [[ -z "${BUILD_NO_SD:-}" ]]; then           # update mode sends it over the LAN instead
+        mkdir -p "$MOUNT_DIR/custom_firmware"
+        rm -f "$MOUNT_DIR/custom_firmware/ak_rtsp_firmware_"*.squashfs
+        cp "$fw" "$MOUNT_DIR/custom_firmware/"
+        cp "$akdir/flash_tool" "$MOUNT_DIR/flash_tool"
+        chmod +x "$MOUNT_DIR/flash_tool"
+        sync
+    fi
 
     FIRMWARE_NAME="$(basename "$fw")"
     ok "Firmware built and verified: $FIRMWARE_NAME"
@@ -1067,6 +1073,9 @@ EOF_EXPECT
         20) die "Stock APP was restored. Camera is safe, but custom firmware was not installed." ;;
         *) die "Flashing was not confirmed successful. KEEP THE CAMERA POWERED until you understand the failure." ;;
     esac
+    # remembered for ./install.sh --update
+    md5sum "$MOUNT_DIR/custom_firmware/$FIRMWARE_NAME" 2>/dev/null | cut -c1-32 > "$WORK_DIR/cameras/$CAMERA_NAME/installed_md5" || true
+    printf '%s\n' "$CAMERA_IP" > "$WORK_DIR/cameras/$CAMERA_NAME/ip" || true
 }
 final_boot() {
     say ""
@@ -1109,6 +1118,317 @@ final_boot() {
     say "  • After you are happy with the result, reformat the SD card: it still"
     say "    contains your Wi-Fi credentials and your private stock firmware backup."
     say "  • Keep the backup stored at: $(cat "$LATEST_BACKUP_FILE")"
+}
+# ── Update an already decloud camera (./install.sh --update) ────────────────
+# The camera must offer the maintenance shell on port 24: an SD card with the
+# toolkit's hack.sh in the camera (the card from the first installation, or a
+# new maintenance card made here). Nothing in Stage 1 / Wi-Fi is redone: the
+# firmware keeps its own Wi-Fi and settings (CONFIG partition, not rewritten).
+UPDATE_DIR_CAM=/tmp/sd/update
+cam_exec() {
+    # Run one command in the camera's maintenance shell; prints its output,
+    # returns its exit status (90+: no shell).
+    local cmd="$1" t="${2:-60}"
+    case "$cmd" in *'&') cmd="$cmd :" ;; esac          # "cmd & ; echo" is a syntax error
+    CAMERA_IP="$CAMERA_IP" CAM_CMD="$cmd" CAM_T="$t" expect <<'EOF_EXPECT' | tr -d '\r'
+set timeout $env(CAM_T)
+log_user 0
+match_max 200000
+spawn -noecho telnet $env(CAMERA_IP) 24
+expect {
+    -re {[#$] $} {}
+    timeout { puts stderr "No answer from the camera's maintenance port."; exit 90 }
+    eof { puts stderr "The camera closed the maintenance connection."; exit 91 }
+}
+send -- "echo __OUT_B__; $env(CAM_CMD); echo __OUT_E_\$?__\r"
+expect {
+    -re {__OUT_B__\r\n(.*?)__OUT_E_([0-9]+)__} {
+        set out $expect_out(1,string)
+        set rc $expect_out(2,string)
+    }
+    timeout { puts stderr "The camera did not finish the command in time."; exit 92 }
+    eof { puts stderr "The camera closed the maintenance connection."; exit 91 }
+}
+send -- "exit\r"
+puts -nonewline $out
+exit $rc
+EOF_EXPECT
+    return "${PIPESTATUS[0]}"
+}
+cam_fetch_app() {
+    # Copy the camera's current APP partition to $1 over the LAN; verify it.
+    local out="$1" cur got
+    cur="$(cam_exec 'md5sum /dev/mtd7 | cut -c1-32')" || die "Could not read the camera's APP checksum."
+    cur="$(printf '%s' "$cur" | tr -dc '0-9a-f')"
+    [[ ${#cur} -eq 32 ]] || die "Unexpected answer from the camera: '$cur'."
+    cam_exec 'pkill -x nc 2>/dev/null; setsid sh -c "dd if=/dev/mtd7 bs=64k 2>/dev/null | nc -l -p 9187" </dev/null >/dev/null 2>&1 &' >/dev/null \
+        || die "Could not start the transfer on the camera."
+    sleep 1
+    python3 -I - "$CAMERA_IP" 9187 "$out" <<'EOF_PY' || die "Could not copy the camera's APP partition."
+import socket, sys, time
+host, port, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+for i in range(20):
+    try:
+        s = socket.create_connection((host, port), timeout=15); break
+    except OSError:
+        time.sleep(0.5)
+else:
+    sys.exit("cannot connect to the camera")
+with open(out, "wb") as f:
+    while True:
+        d = s.recv(65536)
+        if not d: break
+        f.write(d)
+EOF_PY
+    got="$(md5sum "$out" | cut -c1-32)"
+    [[ "$(stat -c%s "$out")" -eq "$EXPECTED_APP_SIZE" && "$got" == "$cur" ]] \
+        || die "The copy of the camera's APP is incomplete (checksum $got, camera $cur). Nothing was changed."
+    CURRENT_APP_MD5="$cur"
+}
+cam_send() {
+    # Send local file $1 to the camera as $2 (on its SD card) over the LAN; verify it.
+    local src="$1" dst="$2" want got
+    want="$(md5sum "$src" | cut -c1-32)"
+    for _ in 1 2; do
+        cam_exec "pkill -x nc 2>/dev/null; rm -f '$dst'; setsid sh -c \"nc -l -p 9188 > '$dst'\" </dev/null >/dev/null 2>&1 &" >/dev/null \
+            || die "Could not start the transfer on the camera."
+        sleep 1
+        python3 -I - "$CAMERA_IP" 9188 "$src" <<'EOF_PY' || true
+import socket, sys, time
+host, port, src = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+for i in range(20):
+    try:
+        s = socket.create_connection((host, port), timeout=15); break
+    except OSError:
+        time.sleep(0.5)
+else:
+    sys.exit("cannot connect to the camera")
+s.sendall(open(src, "rb").read())
+s.shutdown(socket.SHUT_WR)
+s.recv(1)
+s.close()
+EOF_PY
+        sleep 1
+        got="$(cam_exec "md5sum '$dst' | cut -c1-32" | tr -dc '0-9a-f')" || true
+        [[ "$got" == "$want" ]] && return 0
+        warn "The copy of $(basename "$src") on the camera did not verify; retrying."
+    done
+    die "Could not copy $(basename "$src") to the camera. Nothing was changed."
+}
+choose_update_camera() {
+    say ""
+    say "${BOLD}Which camera do you want to update?${RESET}"
+    local names=() d i
+    for d in "$WORK_DIR"/cameras/*/; do
+        [[ -d "$d" ]] && names+=("$(basename "$d")")
+    done
+    if (( ${#names[@]} )); then
+        say "Cameras installed or updated from this computer:"
+        for i in "${!names[@]}"; do
+            say "  $((i + 1))) ${names[$i]}"
+        done
+        say "  $(( ${#names[@]} + 1 ))) Another camera (installed elsewhere)"
+        say "  0) Quit"
+        ask_menu "Choose: " 0 $(( ${#names[@]} + 1 ))
+        [[ "$REPLY" == 0 ]] && quit_cleanly
+        if (( REPLY <= ${#names[@]} )); then
+            CAMERA_NAME="${names[$((REPLY - 1))]}"
+            CAMERA_HOSTNAME="$CAMERA_NAME"
+            CAMERA_BACKUP_DIR="$BACKUP_DIR/$CAMERA_NAME"
+            CAMERA_BUILD_DIR="$BUILD_DIR/$CAMERA_NAME"
+            LATEST_BACKUP_FILE="$WORK_DIR/cameras/$CAMERA_NAME/latest_backup_path"
+            mkdir -p "$CAMERA_BACKUP_DIR" "$CAMERA_BUILD_DIR"
+            [[ -f "$WORK_DIR/cameras/$CAMERA_NAME/ip" ]] && CAMERA_IP="$(cat "$WORK_DIR/cameras/$CAMERA_NAME/ip")"
+            ok "Updating '$CAMERA_NAME'."
+            return
+        fi
+    fi
+    ask_camera_name
+}
+prepare_maintenance_sd() {
+    # A card that only opens the maintenance shell (Telnet port 24): no Wi-Fi
+    # change (the firmware keeps its own), no backup stage, no vendor overrides.
+    info "Preparing the maintenance SD card..."
+    rm -rf "${MOUNT_DIR:?}"/* "${MOUNT_DIR:?}"/.[!.]* "${MOUNT_DIR:?}"/..?* 2>/dev/null || true
+    cp -a "$SRC_DIR/toolkit/sd_card/." "$MOUNT_DIR/"
+    mkdir -p "$MOUNT_DIR/custom/state" "$MOUNT_DIR/logs"
+    : > "$MOUNT_DIR/custom/state/dump.done"            # no filesystem copy
+    printf '# Generated by the Decloud Wizard (update): Wi-Fi is left as it is\nMODE=none\n' > "$MOUNT_DIR/custom/configs/wifi.conf"
+    sed -i -E 's/^TELNET=.*/TELNET=1/; s/^TELNET_PORT=.*/TELNET_PORT=24/; s/^ONVIF=.*/ONVIF=0/; s/^FTP=.*/FTP=0/;
+               s/^OVERRIDE_HW_SETTINGS=.*/OVERRIDE_HW_SETTINGS=0/; s/^OVERRIDE_SW_SETTINGS=.*/OVERRIDE_SW_SETTINGS=0/' \
+        "$MOUNT_DIR/custom/configs/hack.conf"
+    if ! grep -q 'DECLOUD_ENTRYPOINT_LOCK' "$MOUNT_DIR/custom/scripts/entrypoint.sh"; then
+        sed -i '2i\# DECLOUD_ENTRYPOINT_LOCK\nmkdir /tmp/decloud_entrypoint.lock 2>/dev/null || exit 0' "$MOUNT_DIR/custom/scripts/entrypoint.sh"
+    fi
+    if ! grep -q 'DECLOUD_WIZARD_HOOK' "$MOUNT_DIR/hack.sh"; then
+        # hack.sh does not end with a newline: start a new line, or the hook joins its last command
+        printf '\n' >> "$MOUNT_DIR/hack.sh"
+        cat >> "$MOUNT_DIR/hack.sh" <<'EOF_HOOK'
+# DECLOUD_WIZARD_HOOK - maintenance card: telnet on port 24 only
+/bin/sh "${SCRIPTS_DIR}/entrypoint.sh" >/dev/null 2>&1 &
+EOF_HOOK
+    fi
+    sync
+    ok "Maintenance SD card is ready."
+}
+ask_maintenance_access() {
+    say ""
+    say "${BOLD}Maintenance access${RESET}"
+    say "The update runs through the camera's maintenance port (Telnet 24), which is open"
+    say "while a maintenance SD card is in the camera."
+    say ""
+    say "  1) The camera already has a maintenance card in (for example the card from the"
+    say "     first installation) and is running"
+    say "  2) Make a new maintenance SD card now (the card will be ERASED)"
+    say "  0) Quit"
+    ask_menu "Choose: " 0 2
+    case "$REPLY" in
+        0) quit_cleanly ;;
+        2)
+            choose_sd_device
+            format_sd
+            prepare_maintenance_sd
+            prepare_sd_for_removal
+            say ""
+            say "1. Unplug the camera's USB-C power."
+            say "2. Insert the maintenance SD card into the camera."
+            say "3. Plug the power back in and wait about 45 seconds."
+            pause
+            ;;
+    esac
+    ask_camera_ip
+    printf '%s\n' "$CAMERA_IP" > "$WORK_DIR/cameras/$CAMERA_NAME/ip"
+}
+read_current_firmware() {
+    info "Reading the firmware currently on the camera (5 MiB over the LAN)..."
+    local rc=0
+    cam_exec 'grep -q "^mtd7: 00500000 00001000 \"APP\"$" /proc/mtd && grep -q "^mtd6: 00040000 00001000 \"CONFIG\"$" /proc/mtd' >/dev/null || rc=$?
+    (( rc < 90 )) || die "Cannot use the camera's maintenance shell on port 24. Nothing was changed."
+    (( rc == 0 )) || die "The camera's flash layout is not the supported one. Nothing was changed."
+    local stamp dir
+    stamp="$(date +%Y%m%d_%H%M%S)"
+    dir="$CAMERA_BACKUP_DIR/before_update_$stamp"
+    mkdir -p "$dir"
+    cam_fetch_app "$dir/mtdblock7.bin"
+    CURRENT_APP_FILE="$dir/mtdblock7.bin"
+    ok "Current firmware copied and verified (MD5 $CURRENT_APP_MD5): $dir"
+    local x="$CAMERA_BUILD_DIR/current_app_check"
+    rm -rf "$x"
+    unsquashfs -d "$x" "$CURRENT_APP_FILE" >/dev/null || die "The camera's APP partition is not a readable squashfs. Nothing was changed."
+    if [[ -f "$x/bin/anyka_ipc" || ! -f "$x/bin/ak_rtsp" ]]; then
+        rm -rf "$x"
+        die "This camera still runs the stock firmware: use the full wizard (./install.sh) for the first installation."
+    fi
+    rm -rf "$x"
+    ok "The camera runs an ak_rtsp build: it can be updated."
+}
+update_flash() {
+    local fw="$BUILT_FIRMWARE" fwmd5
+    fwmd5="$(md5sum "$fw" | cut -c1-32)"
+    info "Sending the new firmware to the camera's SD card (nothing is written to flash yet)..."
+    cam_exec "mkdir -p $UPDATE_DIR_CAM" >/dev/null || die "Could not create $UPDATE_DIR_CAM on the camera's SD card."
+    cam_send "$SELF_DIR/camera/decloud_update.sh" "$UPDATE_DIR_CAM/decloud_update.sh"
+    cam_send "$SRC_DIR/firmware/src/ak_rtsp/flash_tool" "$UPDATE_DIR_CAM/flash_tool"
+    cam_send "$fw" "$UPDATE_DIR_CAM/new_app.squashfs"
+    ok "New firmware, flash tool and update script are on the camera and verified."
+    say ""
+    warn "The next step rewrites the APP partition. Do not unplug the camera while it runs."
+    say "Your settings (Wi-Fi, login, image, recordings) are kept: they are not in that partition."
+    say "The camera keeps a copy of the current firmware on its SD card and restores it"
+    say "automatically if anything does not verify."
+    say ""
+    say "  1) Update the camera now"
+    say "  0) Quit without changing anything"
+    ask_menu "Choose: " 0 1
+    [[ "$REPLY" == 1 ]] || quit_cleanly
+    info "Updating. This can take a minute..."
+    export CAMERA_IP UPD_CMD="sh $UPDATE_DIR_CAM/decloud_update.sh $UPDATE_DIR_CAM/new_app.squashfs $fwmd5 $CURRENT_APP_MD5 $UPDATE_DIR_CAM/flash_tool"
+    set +e
+    expect <<'EOF_EXPECT'
+set timeout 300
+log_user 1
+spawn telnet $env(CAMERA_IP) 24
+expect {
+    -re {[#$] $} {}
+    timeout { puts "\nERROR: Telnet connection timed out."; exit 10 }
+    eof { puts "\nERROR: Telnet connection closed."; exit 11 }
+}
+send -- "$env(UPD_CMD)\r"
+expect {
+    -re {DECLOUD_UPDATE_SUCCESS\r} { puts "\nWizard detected a successful update + verification."; send -- "exit\r"; exit 0 }
+    -re {DECLOUD_UPDATE_RESTORED\r} { puts "\nThe update failed, but the previous firmware was restored."; send -- "exit\r"; exit 20 }
+    -re {DECLOUD_UPDATE_FAILED\r} { puts "\nUpdate failed. Keep the camera powered and review the output."; exit 21 }
+    timeout { puts "\nERROR: Timed out waiting for the update. KEEP CAMERA POWERED."; exit 22 }
+    eof { puts "\nERROR: Connection closed before success was confirmed. KEEP CAMERA POWERED."; exit 23 }
+}
+EOF_EXPECT
+    local rc=$?
+    set -e
+    case "$rc" in
+        0) ok "Firmware written and verified." ;;
+        20) die "The previous firmware was restored. The camera is safe; it was not updated." ;;
+        *) die "The update was not confirmed. KEEP THE CAMERA POWERED until you understand the failure." ;;
+    esac
+    printf '%s\n' "$fwmd5" > "$WORK_DIR/cameras/$CAMERA_NAME/installed_md5"
+}
+update_reboot() {
+    info "Restarting the camera..."
+    cam_exec 'sync; setsid sh -c "sleep 1; reboot" </dev/null >/dev/null 2>&1 &' >/dev/null || true
+    sleep 20
+    local i
+    for i in $(seq 1 40); do
+        check_tcp "$CAMERA_IP" 80 && check_tcp "$CAMERA_IP" 554 && break
+        sleep 3
+    done
+    if check_tcp "$CAMERA_IP" 80 && check_tcp "$CAMERA_IP" 554; then
+        ok "The camera is back: web page and RTSP answer at $CAMERA_IP."
+    else
+        warn "The camera did not answer yet. If it stays silent, unplug it for 5 seconds and plug it back in."
+    fi
+    say ""
+    say "${GREEN}${BOLD}Done.${RESET} Camera ${BOLD}$CAMERA_NAME${RESET} runs firmware ${BOLD}$FIRMWARE_COMMIT${RESET}."
+    say ""
+    say "  • Web page: http://$CAMERA_IP/  (settings and login are unchanged)"
+    say "  • Previous firmware, if you ever need it: $(dirname "$CURRENT_APP_FILE")"
+    say "  • Remove the maintenance SD card when you no longer need it: while it is in"
+    say "    the camera, port 24 gives anyone on your network a root shell without a password."
+}
+main_update() {
+    (( EUID != 0 )) || die "Run ./install.sh without sudo. The wizard asks for sudo only for packages and SD-card operations."
+    mkdir -p "$WORK_DIR" "$SRC_DIR" "$BACKUP_DIR" "$BUILD_DIR" "$MOUNT_DIR" "$RUNTIME_DIR"
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    banner
+    say "${BOLD}UPDATE MODE${RESET}: install the newest firmware on a camera that already runs it."
+    say "No Wi-Fi setup, no backup stage; your settings are kept."
+
+    section 1 5 "Camera"
+    choose_update_camera
+    mkdir -p "$WORK_DIR/cameras/$CAMERA_NAME"
+
+    section 2 5 "Computer checks"
+    install_dependencies
+    ensure_wizard_assets
+    update_sources
+
+    section 3 5 "Maintenance access"
+    ask_maintenance_access
+    read_current_firmware
+
+    section 4 5 "Build the new firmware"
+    local base="$CURRENT_APP_FILE"
+    if [[ -f "$LATEST_BACKUP_FILE" && -f "$(cat "$LATEST_BACKUP_FILE")/mtdblock7.bin" ]]; then
+        base="$(cat "$LATEST_BACKUP_FILE")/mtdblock7.bin"
+        info "Building from this camera's stock backup: $base"
+    else
+        info "No stock backup of this camera on this computer: building from its current firmware."
+    fi
+    BUILD_BASE_APP="$base" BUILD_NO_SD=1 build_firmware
+
+    section 5 5 "Update & verify"
+    update_flash
+    update_reboot
 }
 main() {
     (( EUID != 0 )) || die "Run ./install.sh without sudo. The wizard asks for sudo only for packages and SD-card operations."
@@ -1163,12 +1483,20 @@ LSC 3215672.2 Decloud Wizard v$VERSION
 Run without arguments to start the interactive installer.
 
 Options:
+  --update         Update a camera that already runs this firmware: build the newest
+                   version and flash it through the maintenance port (an SD card with
+                   the maintenance shell in the camera: the first installation's card,
+                   or a new one the wizard makes). Settings are kept.
   -h, --help       Show this help
   -V, --version    Show version
 Supported labels: 3215672.2 / SI B26101 or C26101; 3215672.3 / SI D26228.
 C26101 and D26228 are community-reported. The exact MTD layout is required.
 Run the interactive installer without sudo.
 EOF_HELP
+        exit 0
+        ;;
+    --update)
+        main_update
         exit 0
         ;;
 esac

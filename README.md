@@ -228,6 +228,11 @@ flashes it with verification and automatic restore of the stock APP on failure:
 curl -fsSL https://raw.githubusercontent.com/pix/LSC_AK3918AV130_cam_custom_firmware/main/tools/decloud_wizard/install.sh -o /tmp/lsc-decloud-wizard.sh && bash /tmp/lsc-decloud-wizard.sh
 ```
 
+**Updating** a camera that already runs this firmware: the same command with `--update`
+(`bash /tmp/lsc-decloud-wizard.sh --update`). No Wi-Fi or backup stage, settings kept; it needs a maintenance SD
+card in the camera (the installation's card, or a new one the wizard makes). See the wizard's
+[README](tools/decloud_wizard/README.md#-updating-a-camera---update).
+
 Manual steps (any OS):
 
 ### Step 1: Prepare the MicroSD Card
