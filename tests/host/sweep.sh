@@ -15,6 +15,7 @@ ok()  { n=$((n + 1)); echo "PASS $*"; }
 bad() { n=$((n + 1)); fails=$((fails + 1)); echo "FAIL $*"; }
 alive() { [ "$(curl -s -o /dev/null -m 10 -w %{http_code} http://$H/)" = 401 ]; }
 code() { curl "${A[@]}" -o "$W/body" -w "%{http_code}" "$@"; }
+expect() { local want=$1 got=$2; shift 2; if [ "$got" = "$want" ]; then ok "$* -> $got"; else bad "$* -> $got (want $want)"; fi; }
 
 echo "== GET endpoints"
 for p in / /api/acme /api/audio/aec /api/config "/api/config?prefix=mqtt." /api/events /api/health /api/hook/token \
@@ -131,6 +132,22 @@ timeout 180 "$VENV/bin/python" -I "$T/onvif/ha_compat_test.py" "$H" admin admin 
 grep -q "FAILURES: 0" "$W/ha" && ok "ha_compat: $(grep -c '^PASS' "$W/ha") passed" || bad "ha_compat: $(grep -E 'FAIL' "$W/ha" | head -3)"
 timeout 60 "$VENV/bin/python" -I "$T/onvif/backchannel_test.py" "$H" admin admin 5 >"$W/bc" 2>&1
 grep -q "sent [0-9]* RTP" "$W/bc" && ok "backchannel: $(tail -1 "$W/bc")" || bad "backchannel: $(tail -3 "$W/bc")"
+
+echo "== Home Assistant ONVIF setup with the HTTP -> HTTPS redirect on, and on the HTTPS port"
+# Reported: HA's ONVIF setup failed with "[Errno 104] Connection reset by peer" on port 443 (HA only
+# speaks plain HTTP: the TLS port dropped it) and failed on port 80 with the redirect on (SOAP POST -> 301).
+for i in $(seq 1 40); do curl -sk -o /dev/null "https://$H/" && break; sleep 0.5; done
+curl "${A[@]}" -o /dev/null --data "redirect=1" "http://$H/api/tls"
+expect 301 "$(code "http://$H/")" "redirect on: the page still goes to HTTPS"
+r=$(timeout 60 "$VENV/bin/python" -I "$T/onvif/ha_setup.py" "$H" 80 admin admin 2>&1 | tail -1)
+[[ "$r" == OK* ]] && ok "redirect on: HA ONVIF setup on port 80: $r" || bad "redirect on: HA ONVIF setup on port 80: $r"
+expect 200 "$(code "http://$H/snapshot.jpg")" "redirect on: ONVIF snapshot URL over HTTP (Digest)"
+c=$(curl -s -o "$W/p443" -w "%{http_code}" -m 10 "http://$H:443/")
+[ "$c" = 400 ] && grep -q "port 80" "$W/p443" && ok "plain HTTP on port 443 -> 400 with a hint (no reset)" || bad "plain HTTP on 443: $c $(head -c 100 "$W/p443")"
+r=$(timeout 60 "$VENV/bin/python" -I "$T/onvif/ha_setup.py" "$H" 443 admin admin 2>&1 | tail -1)
+[[ "$r" == FAIL* && "$r" != *"reset by peer"* && "$r" == *"use port 80"* ]] && ok "HA ONVIF on port 443 shows the hint, not a reset: ${r:0:140}" || bad "HA ONVIF on 443: $r"
+expect 200 "$(curl -sk -o /dev/null -w "%{http_code}" --digest -u admin:admin -m 30 "https://$H/api/tls")" "HTTPS itself still works after plain requests"
+curl -sk --digest -u admin:admin -m 30 -H "X-Requested-With: lsc" -o /dev/null --data "redirect=0" "https://$H/api/tls"
 
 echo "== recordings (tmpfs SD card)"
 curl "${A[@]}" -o /dev/null --data "record.mode=continuous" "http://$H/api/config"

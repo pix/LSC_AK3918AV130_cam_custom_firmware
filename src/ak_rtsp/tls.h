@@ -28,6 +28,9 @@ void tls_maintain(void);
 /* Run the TLS handshake on an accepted socket. Returns a connection or NULL
  * (socket closed). handshake_ms bounds the whole handshake. */
 conn_t *tls_accept(int fd, int handshake_ms);
+/* Plain HTTP sent to a TLS port: answered with a readable 400 ("use http://
+ * on port 80") instead of a reset. Called by tls_accept. 1 if handled. */
+int tls_plain_http(int fd);
 
 /* Settings (TLS_DIR/ak_rtsp_tls.conf). names: comma/space separated DNS
  * names, validated. Re-issues the certificate when names change.

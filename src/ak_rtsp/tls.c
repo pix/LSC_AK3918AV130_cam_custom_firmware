@@ -776,10 +776,61 @@ void tls_maintain(void)
     pthread_mutex_unlock(&g_lock);
 }
 
+/* A plain HTTP request on a TLS port (http:// to :443, e.g. Home Assistant's
+ * ONVIF integration, which only speaks plain HTTP): answer it in plain text
+ * instead of failing the handshake. Closing with the request unread makes the
+ * kernel send a reset, which clients report as "Connection reset by peer" and
+ * which looks like a network fault. 1 if handled (fd still open). */
+int tls_plain_http(int fd)
+{
+    unsigned char b0;
+    if (recv(fd, &b0, 1, MSG_PEEK) != 1 || b0 < 'A' || b0 > 'Z') return 0;   /* TLS starts with 0x16 */
+    char req[1024];
+    ssize_t n = recv(fd, req, sizeof req - 1, MSG_PEEK);
+    if (n <= 0) return 0;
+    req[n] = 0;
+    char *eol = strstr(req, "\r\n");
+    if (!eol) return 0;
+    *eol = 0;
+    char *v = strstr(req, " HTTP/1.");
+    if (!v || v[8] == 0 || v[9] != 0) return 0;               /* request line must end with HTTP/1.x */
+    static const char body[] =
+        "This is the camera's HTTPS port: use https:// here, or http:// on port 80.\n"
+        "(Home Assistant's ONVIF integration only speaks plain HTTP: give it port 80.)\n";
+    /* a POST is most likely SOAP (ONVIF): a SOAP fault, so the client shows the hint itself */
+    static const char fault[] =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body><s:Fault>"
+        "<s:Code><s:Value>s:Sender</s:Value></s:Code><s:Reason><s:Text xml:lang=\"en\">"
+        "This is the camera's HTTPS port; ONVIF over plain HTTP: use port 80"
+        "</s:Text></s:Reason></s:Fault></s:Body></s:Envelope>\n";
+    int soap = !strncmp(req, "POST ", 5);
+    char resp[1024];
+    int rl = snprintf(resp, sizeof resp, "HTTP/1.1 400 Bad Request\r\nContent-Type: %s\r\n"
+                      "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                      soap ? "application/soap+xml; charset=utf-8" : "text/plain; charset=utf-8",
+                      soap ? sizeof fault - 1 : sizeof body - 1, soap ? fault : body);
+    struct timeval tv = { 0, 300000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    char junk[2048];
+    for (int i = 0; i < 32 && recv(fd, junk, sizeof junk, MSG_DONTWAIT) > 0; i++) {}   /* the request */
+    if (rl > 0) (void)send(fd, resp, (size_t)rl, MSG_NOSIGNAL);
+    shutdown(fd, SHUT_WR);
+    for (int i = 0; i < 32 && recv(fd, junk, sizeof junk, 0) > 0; i++) {}   /* until the client closes (or 300 ms) */
+    static int logged;
+    if (logged++ < 3) fprintf(stderr, "[tls] plain HTTP request on the TLS port: answered 400 (use http:// on port 80)\n");
+    return 1;
+}
+
 conn_t *tls_accept(int fd, int handshake_ms)
 {
     static int logged;
     if (!g_ready) { close(fd); return NULL; }
+    {
+        struct timeval tv = { handshake_ms / 1000, (handshake_ms % 1000) * 1000 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);   /* the peek below waits at most this */
+        if (tls_plain_http(fd)) { close(fd); return NULL; }
+    }
     conn_t *c = calloc(1, sizeof *c);
     mbedtls_ssl_context *ssl = calloc(1, sizeof *ssl);
     if (!c || !ssl) { free(c); free(ssl); close(fd); return NULL; }

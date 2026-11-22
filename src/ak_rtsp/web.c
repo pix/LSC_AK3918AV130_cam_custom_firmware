@@ -827,10 +827,15 @@ static int handle_conn(conn_t *cn, req_t *in, const struct sockaddr *peer)
     }
 
     /* Optional HTTP -> HTTPS redirect for browsers. The CA certificate stays
-     * reachable over HTTP (a new device fetches it before trusting HTTPS) and
-     * so do webhooks (automations would not follow a POST redirect). */
+     * reachable over HTTP (a new device fetches it before trusting HTTPS), and
+     * so do webhooks (automations would not follow a POST redirect) and ONVIF:
+     * NVRs and Home Assistant's ONVIF integration never follow a redirect (HA
+     * only speaks plain HTTP: with the redirect on, its setup failed), nor the
+     * snapshot URL ONVIF hands out (GetSnapshotUri). ONVIF's WS-Security login
+     * and the snapshot's HTTP Digest never send the password itself. */
     if (!conn_is_tls(cn) && !r.via_proxy && tls_redirect() && strcmp(path, "/api/tls/ca.crt") != 0 &&
-        strncmp(path, "/hook/", 6) != 0 && r.host[0]) {
+        strncmp(path, "/hook/", 6) != 0 && strncmp(path, "/onvif/", 7) != 0 && strcmp(path, "/snapshot.jpg") != 0 &&
+        r.host[0]) {
         char host[128], loc[512];
         snprintf(host, sizeof(host), "%s", r.host);
         char *colon = strchr(host, ':');

@@ -59,6 +59,20 @@ Behaviour that protects the camera and your rate limits:
   renewals do not grow memory;
 - API tokens are never logged or shown; the activity log is in the page (Activity).
 
+## HTTP -> HTTPS redirect
+
+With "Redirect HTTP to HTTPS" on, port 80 answers browsers with a 301 to `https://`. These stay on plain HTTP,
+because the clients using them cannot follow a redirect or do not trust the camera CA:
+
+- `/api/tls/ca.crt` (a new device fetches the CA before it trusts HTTPS);
+- `/hook/...` webhooks (automations do not follow a POST redirect);
+- `/onvif/...` and `/snapshot.jpg` (the snapshot URL ONVIF hands out): NVRs and Home Assistant's ONVIF
+  integration never follow a redirect. WS-Security and HTTP Digest never send the password itself.
+
+**Home Assistant ONVIF: use port 80.** The integration only speaks plain HTTP. On port 443 it used to fail
+with "[Errno 104] Connection reset by peer": the HTTPS port dropped the plain request. A plain HTTP request
+on 443 now gets a readable `400` ("this is the camera's HTTPS port: use http:// on port 80").
+
 ## Reset button
 
 Holding the reset button 10 s (or a `reset_auth` file on the SD card) resets the login to admin/admin and also
