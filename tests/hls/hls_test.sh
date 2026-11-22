@@ -167,6 +167,29 @@ read -r TF2 _ <<< "$("${PY[@]}" tfdt "$B/seg$ms.m4s")"
 [ "$TF2" -gt $((TF1 + D1)) ] && ok "timeline continues forward: tfdt $TF2 > $((TF1 + D1))" || bad "timeline: tfdt $TF2 after $((TF1 + D1))"
 "${PY[@]}" client "$URL" 12 restarted && ok "playback after the restart" || bad "playback after the restart"
 
+echo "== live.mp4: one endless fragmented MP4 (low latency, what casting uses by default)"
+SLACK=0.6; [ "$F" != 1 ] && SLACK=2
+TM=$(curl "${A[@]}" "http://$H/api/hls/token" | jget token); M="http://$H/hls/$TM/live.mp4"
+"${PY[@]}" livemp4 "$M" 12 direct "$W/live.mp4" "$SLACK" && ok "live.mp4: keyframe first, one frame per fragment, keeps pace with real time" || bad "live.mp4 stream"
+"${PY[@]}" ffprobe "$W/live.mp4" 8 && ok "ffprobe live.mp4" || bad "ffprobe live.mp4"
+expect 403 "$(code "http://$H/hls/0123456789abcdef0123456789abcdef/live.mp4")" "live.mp4 with an unknown token"
+curl -s -o /dev/null -m $((10 * F)) "$M" & L1=$!
+curl -s -o /dev/null -m $((10 * F)) "$M" & L2=$!
+for i in $(seq 1 $((10 * F))); do [ "$(hls_state | jget mp4_streams)" = 2 ] && break; sleep 0.5; done
+expect 2 "$(hls_state | jget mp4_streams)" "two live.mp4 streams counted"
+expect 503 "$(curl -s -o /dev/null -w "%{http_code}" -m 5 "$M")" "third live.mp4 stream refused"
+wait $L1 $L2 2>/dev/null
+for i in $(seq 1 $((10 * F))); do [ "$(hls_state | jget mp4_streams)" = 0 ] && break; sleep 0.5; done
+expect 0 "$(hls_state | jget mp4_streams)" "streams released after the clients left"
+curl -s -o /dev/null -m 60 "$M" & L1=$!
+sleep 3; t0=$(date +%s)
+curl "${A[@]}" -o /dev/null --data "hls.enabled=off" "http://$H/api/config"
+wait $L1 2>/dev/null; t1=$(date +%s)
+[ $((t1 - t0)) -le $((3 * F)) ] && ok "hls.enabled=off ends a running live.mp4 ($((t1 - t0)) s)" || bad "live.mp4 still running $((t1 - t0)) s after hls.enabled=off"
+curl "${A[@]}" -o /dev/null --data "hls.enabled=on" "http://$H/api/config"
+expect mp4 "$(hls_state | jget cast_format)" "hls.cast_format defaults to mp4"
+expect 400 "$(code "${A[@]}" --data "hls.cast_format=webm" "http://$H/api/config")" "hls.cast_format=webm refused"
+
 if [ "$(curl "${A[@]}" -o /dev/null -w "%{http_code}" "http://$H/api/hls/cast")" != 404 ]; then   # cast.c is optional
 echo "== casting from the camera to a (fake) Chromecast: mDNS discovery, Cast v2 over TLS"
 cast_wait() {   # poll GET /api/hls/cast until not busy; prints the state JSON
@@ -176,9 +199,13 @@ cast_wait() {   # poll GET /api/hls/cast until not busy; prints the state JSON
   done; echo "$j"
 }
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$W/fc.key" -out "$W/fc.crt" -days 2 -subj /CN=fakecast 2>/dev/null
-: > "$W/fc.log"; : > "$W/fc2.log"
-python3 -I "$T/fake_cast.py" 8009 "$W/fc.crt" "$W/fc.key" "$W/fc.log" --mdns "$H" --launch-delay 5 > "$W/fc.out" 2>&1 & FC=$!
+: > "$W/fc.log"; : > "$W/fc2.log"; : > "$W/fc3.log"; : > "$W/fc4.log"; : > "$W/fc5.log"
+export LIVEMP4_SLACK=$SLACK
+python3 -I "$T/fake_cast.py" 8009 "$W/fc.crt" "$W/fc.key" "$W/fc.log" --mdns "$H" --launch-delay 5 --preroll 4 > "$W/fc.out" 2>&1 & FC=$!
 python3 -I "$T/fake_cast.py" 8010 "$W/fc.crt" "$W/fc.key" "$W/fc2.log" --behavior load_failed > "$W/fc2.out" 2>&1 & FC2=$!
+python3 -I "$T/fake_cast.py" 8012 "$W/fc.crt" "$W/fc.key" "$W/fc3.log" --behavior mp4_refused > "$W/fc3.out" 2>&1 & FC3=$!
+python3 -I "$T/fake_cast.py" 8013 "$W/fc.crt" "$W/fc.key" "$W/fc4.log" --behavior noseek --preroll 4 --play-secs 30 > "$W/fc4.out" 2>&1 & FC4=$!
+python3 -I "$T/fake_cast.py" 8014 "$W/fc.crt" "$W/fc.key" "$W/fc5.log" --behavior noseek --preroll 4 --play-secs 30 > "$W/fc5.out" 2>&1 & FC5=$!
 sleep 1
 expect 202 "$(code "${A[@]}" -X POST "http://$H/api/hls/cast/discover")" "start discovery"
 j=$(cast_wait)
@@ -189,37 +216,97 @@ tv = dev.get((sys.argv[1], 8009)); grp = dev.get((sys.argv[1], 32187))
 ok = tv and tv["name"] == "Living  Room  TV" and tv["model"] == "Chromecast" and grp and grp["name"].startswith("All speakers")
 sys.exit(0 if ok and d["state"] == "idle" else 1)' "$H" && ok "discovery: $j" || bad "discovery: $j"
 expect 400 "$(code "${A[@]}" --data "host=tv.local" "http://$H/api/hls/cast")" "cast to a host name (IPv4 only)"
-curl "${A[@]}" -o /dev/null --data "hls.enabled=off" "http://$H/api/config"   # cold start: no producer running
-for i in $(seq 1 $((10 * F))); do [ "$(hls_state | jget running)" = False ] && break; sleep 1; done
-curl "${A[@]}" -o /dev/null --data "hls.enabled=on" "http://$H/api/config"
-expect False "$(hls_state | jget running)" "producer stopped before casting"
-expect 202 "$(code "${A[@]}" --data "host=$H" "http://$H/api/hls/cast")" "cast to $H:8009"
-sleep 2                                         # the fake receiver app takes 5 s to start
-expect True "$(hls_state | jget running)" "producer warmed up while the receiver app starts"
-j=$(cast_wait)
-[ "$(echo "$j" | jget state)" = playing ] && ok "cast state: $j" || bad "cast state: $j"
-for i in $(seq 1 $((30 * F))); do grep -q '"ev": "played"' "$W/fc.log" && break; sleep 1; done
-python3 -I - "$W/fc.log" "$H" "$F" <<'EOF' && ok "receiver side: $(cat "$W/fc.sum")" || bad "receiver side: $(cat "$W/fc.sum")"
+receiver_check() {   # <fake_cast log> <mp4|hls|fallback>: what the fake device saw and did
+  for i in $(seq 1 $((40 * F))); do grep -q '"ev": "played"' "$1" && break; sleep 1; done
+  python3 -I - "$1" "$H" "$F" "$2" <<'EOF'
 import json, re, sys
-ev = [json.loads(l) for l in open(sys.argv[1])]
-load = next((e for e in ev if e["ev"] == "load"), {}); m = load.get("media", {})
+log, host, f, mode = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+ev = [json.loads(l) for l in open(log)]
+loads = [e for e in ev if e["ev"] == "load"]; load = loads[-1] if loads else {}; m = load.get("media", {})
 fetched = next((e for e in ev if e["ev"] == "fetched"), {}); played = next((e for e in ev if e["ev"] == "played"), {})
 msgs = [(e["ns"].rsplit(".", 1)[1], e["type"]) for e in ev if e["ev"] == "msg"]
-url_ok = re.fullmatch(r"http://%s/hls/[0-9a-f]{32}/index\.m3u8" % re.escape(sys.argv[2]), m.get("contentId", "")) is not None
+mp4 = mode == "mp4"
+url_ok = re.fullmatch(r"http://%s/hls/[0-9a-f]{32}/%s" % (re.escape(host), r"live\.mp4" if mp4 else r"index\.m3u8"), m.get("contentId", "")) is not None
 checks = {"tls": any(e["ev"] == "connected" for e in ev), "launch": ("receiver", "LAUNCH") in msgs,
           "pong": ("heartbeat", "PONG") in msgs, "connect app": load.get("dst") == "web-7",
-          "url": url_ok, "type": m.get("contentType") == "application/x-mpegurl", "live": m.get("streamType") == "LIVE",
-          "fmp4": m.get("hlsSegmentFormat") == "fmp4" and m.get("hlsVideoSegmentFormat") == "fmp4",
+          "url": url_ok, "type": m.get("contentType") == ("video/mp4" if mp4 else "application/x-mpegurl"),
+          "live": m.get("streamType") == "LIVE",
           "live edge (no currentTime)": "currentTime" not in load.get("keys", ["currentTime"]),
-          "playlist ready (warm)": 0 <= fetched.get("playlist_ms", 99999) < 1500 * int(sys.argv[3]),
           "fetched": fetched.get("segment", 0) > 0 and fetched.get("cors") == "*", "played": played.get("result", "").startswith("PASS")}
+if mp4:
+    checks["first frame soon"] = 0 <= fetched.get("first_ms", 99999) < 3500 * f      # next keyframe (GOP 2 s)
+else:
+    checks["fmp4"] = m.get("hlsSegmentFormat") == "fmp4" and m.get("hlsVideoSegmentFormat") == "fmp4"
+if mode == "hls":
+    checks["playlist ready (warm)"] = 0 <= fetched.get("playlist_ms", 99999) < 1500 * f
+if mode == "fallback":
+    checks["tried mp4 first"] = len(loads) == 2 and loads[0]["media"].get("contentType") == "video/mp4"
+    checks["same session"] = len(loads) == 2 and loads[0]["sessionId"] == loads[1]["sessionId"]
 bad = [k for k, v in checks.items() if not v]
-open(sys.argv[1].replace("fc.log", "fc.sum"), "w").write(("all ok: " + ", ".join(checks)) if not bad else f"failed {bad}; {played.get('result', '')[:300]}")
+print(("all ok: " + ", ".join(checks)) if not bad else f"failed {bad}; {played.get('result', '')[:300]}")
 sys.exit(1 if bad else 0)
 EOF
+}
+cold_start() {      # no HLS producer running
+  curl "${A[@]}" -o /dev/null --data "hls.enabled=off" "http://$H/api/config"
+  for i in $(seq 1 $((10 * F))); do [ "$(hls_state | jget running)" = False ] && break; sleep 1; done
+  curl "${A[@]}" -o /dev/null --data "hls.enabled=on" "http://$H/api/config"
+}
+# 1. default: the low latency live.mp4
+cold_start
+expect False "$(hls_state | jget running)" "producer stopped before casting"
+expect 202 "$(code "${A[@]}" --data "host=$H" "http://$H/api/hls/cast")" "cast to $H:8009 (live.mp4)"
+j=$(cast_wait)
+[ "$(echo "$j" | jget state)" = playing ] && [[ "$j" == *"low latency MP4"* ]] && ok "cast state: $j" || bad "cast state: $j"
+r=$(receiver_check "$W/fc.log" mp4) && ok "receiver side (mp4): $r" || bad "receiver side (mp4): $r"
+[[ "$j" == *"jumped ahead"* ]] && echo "$j" | python3 -I -c 'import json, re, sys
+m = re.search(r"([0-9.]+) s behind -> ([0-9.]+) s", json.load(sys.stdin)["message"]); sys.exit(0 if m and float(m[1]) > 3 and float(m[2]) <= 1.5 else 1)' \
+  && ok "catch-up: jumped from the receiver's start-up buffer to ~1 s behind: $(echo "$j" | jget message)" || bad "catch-up (seek): $j"
+python3 -I -c 'import json, sys
+p = [json.loads(l) for l in open(sys.argv[1]) if "\"played\"" in l][-1]; sys.exit(0 if len(p.get("seeks", [])) == 1 and not p.get("rates") else 1)' "$W/fc.log" \
+  && ok "one SEEK, playback rate untouched" || bad "seeks / rates: $(grep '"played"' "$W/fc.log" | tail -1)"
+expect False "$(hls_state | jget running)" "an MP4 cast does not start the HLS producer"
+CT=$(python3 -I -c 'import json, re, sys
+u = [json.loads(l) for l in open(sys.argv[1])]; u = [e["media"]["contentId"] for e in u if e["ev"] == "load"][-1]
+print(re.search(r"/hls/([0-9a-f]{32})/", u).group(1))' "$W/fc.log")
+c=$(curl -s -o "$W/body" -w "%{http_code}" -m 3 "http://127.0.0.1/hls/$CT/live.mp4")
+[ "$c" = 403 ] && grep -q "invalid or expired HLS token" "$W/body" && ok "cast URL refused from another address (bound to the device)" || bad "cast URL from another address: $c $(head -c 80 "$W/body")"
+expect 200 "$(curl -s -o /dev/null -w "%{http_code}" -m 3 "http://$H/hls/$CT/live.mp4")" "cast URL works from the device's address"
 expect 202 "$(code "${A[@]}" --data "host=$H" "http://$H/api/hls/cast/stop")" "stop casting"
 j=$(cast_wait)
 [ "$(echo "$j" | jget state)" = stopped ] && grep -q '"ev": "stop", "sessionId": "[^"]*", "matched": true' "$W/fc.log" && ok "stopped: $j" || bad "stop: $j"
+expect 403 "$(curl -s -o /dev/null -w "%{http_code}" -m 3 "http://$H/hls/$CT/live.mp4")" "cast URL revoked by Stop"
+# 2. hls.cast_format=hls: playlist warmed up while the receiver app starts
+curl "${A[@]}" -o /dev/null --data "hls.cast_format=hls" "http://$H/api/config"
+: > "$W/fc.log"; cold_start
+expect False "$(hls_state | jget running)" "producer stopped before casting"
+expect 202 "$(code "${A[@]}" --data "host=$H" "http://$H/api/hls/cast")" "cast to $H:8009 (HLS)"
+sleep 2                                         # the fake receiver app takes 5 s to start
+expect True "$(hls_state | jget running)" "producer warmed up while the receiver app starts"
+j=$(cast_wait)
+[ "$(echo "$j" | jget state)" = playing ] && [[ "$j" == *"(HLS)"* ]] && ok "cast state: $j" || bad "cast state: $j"
+r=$(receiver_check "$W/fc.log" hls) && ok "receiver side (hls): $r" || bad "receiver side (hls): $r"
+curl "${A[@]}" -o /dev/null --data "hls.cast_format=mp4" "http://$H/api/config"
+# 3. a receiver that cannot play live.mp4: HLS in the same session
+expect 202 "$(code "${A[@]}" --data "host=$H&port=8012" "http://$H/api/hls/cast")" "cast to a receiver that refuses MP4"
+j=$(cast_wait)
+[ "$(echo "$j" | jget state)" = playing ] && [[ "$j" == *"(HLS)"* ]] && ok "fell back to HLS: $j" || bad "fallback: $j"
+r=$(receiver_check "$W/fc3.log" fallback) && ok "receiver side (fallback): $r" || bad "receiver side (fallback): $r"
+# 4. a receiver that refuses SEEK: plays faster until ~1 s behind, then normal speed again
+expect 202 "$(code "${A[@]}" --data "host=$H&port=8013" "http://$H/api/hls/cast")" "cast to a receiver that refuses SEEK"
+j=$(cast_wait)
+[[ "$j" == *"played faster for a moment"* ]] && ok "catch-up by playback rate: $(echo "$j" | jget message)" || bad "catch-up (rate): $j"
+for i in $(seq 1 $((40 * F))); do grep -q '"ev": "played"' "$W/fc4.log" && break; sleep 1; done
+python3 -I -c 'import json, sys
+p = [json.loads(l) for l in open(sys.argv[1]) if "\"played\"" in l][-1]; sys.exit(0 if p.get("rates") == [1.3, 1.0] and not p.get("seeks") else 1)' "$W/fc4.log" \
+  && ok "playback rate 1.3 then back to 1.0" || bad "rates: $(grep '"played"' "$W/fc4.log" | tail -1)"
+# 5. Stop while catching up: accepted at once, normal speed restored, receiver stopped
+expect 202 "$(code "${A[@]}" --data "host=$H&port=8014" "http://$H/api/hls/cast")" "cast to $H:8014"
+for i in $(seq 1 $((80 * F))); do grep -q '"type": "SET_PLAYBACK_RATE"' "$W/fc5.log" && break; sleep 0.5; done
+expect 202 "$(code "${A[@]}" --data "host=$H&port=8014" "http://$H/api/hls/cast/stop")" "Stop while catching up is accepted"
+j=$(cast_wait)
+nrate=$(grep -c '"type": "SET_PLAYBACK_RATE"' "$W/fc5.log")    # not "n": the PASS/FAIL counter
+[ "$(echo "$j" | jget state)" = stopped ] && [ "$nrate" = 2 ] && ok "catch-up cancelled: rate set back to 1 ($nrate rate messages), receiver stopped" || bad "cancel: $nrate rate messages, $j"
 expect 202 "$(code "${A[@]}" --data "host=$H&port=8010" "http://$H/api/hls/cast")" "cast to a receiver that fails the LOAD"
 j=$(cast_wait); [[ "$(echo "$j" | jget state)" == error && "$j" == *"could not play"* ]] && ok "LOAD_FAILED reported: $j" || bad "LOAD_FAILED: $j"
 expect 202 "$(code "${A[@]}" --data "host=$H&port=8011" "http://$H/api/hls/cast")" "cast to a closed port"
@@ -229,7 +316,7 @@ curl -sk --digest -u admin:admin -m 60 -H "X-Requested-With: lsc" -o /dev/null -
 j=$(curl -sk --digest -u admin:admin -m 60 "https://$H/api/hls/cast"); for i in $(seq 1 10); do [[ "$j" == *'"busy":false'* ]] && break; sleep 1; j=$(curl -sk --digest -u admin:admin -m 60 "https://$H/api/hls/cast"); done
 [[ "$j" == *redirect* ]] && ok "redirect on: cast refused with a reason" || bad "redirect on: $j"
 curl -sk --digest -u admin:admin -m 60 -H "X-Requested-With: lsc" -o /dev/null --data "redirect=0" "https://$H/api/tls"
-kill $FC $FC2 2>/dev/null; wait $FC $FC2 2>/dev/null
+kill $FC $FC2 $FC3 $FC4 $FC5 2>/dev/null; wait $FC $FC2 $FC3 $FC4 $FC5 2>/dev/null
 else echo "SKIP casting: cast.c not built into this firmware"; fi
 
 echo "== switching off revokes every URL"

@@ -13,14 +13,19 @@ then shows **Open HLS stream URL** (creates an address and shows it as a link wi
     GET /hls/<token>/index.m3u8        media playlist (no login: the token is the credential)
     GET /hls/<token>/init.mp4          initialisation segment (EXT-X-MAP)
     GET /hls/<token>/seg<N>.m4s        media segments
-    GET /api/hls                       (login) state: running, segments, bytes, peak, tokens
+    GET /hls/<token>/live.mp4          one endless fragmented MP4, ~1 s behind live (see "Low latency: live.mp4")
+    GET /api/hls                       (login) state: running, segments, bytes, peak, tokens, mp4_streams, cast_format
 
 - Media players cannot do HTTP Digest reliably, so the URL carries a random 128-bit token instead (like the
   live-view WebSocket token). Compared in constant time against at most 8 live tokens.
 - Expiry: a new token must be used within 10 minutes; after that it stays valid while it is used at least every
   2 minutes, and never longer than 24 hours. Creating a 9th token replaces the least recently used one.
   Switching `hls.enabled` off revokes every token at once. Tokens live in RAM (a restart revokes them too).
-- Anyone holding the URL can watch while it is valid: share it like a password.
+- Anyone holding the URL can watch while it is valid: share it like a password. These URLs are the only way to
+  watch without the login, and only a logged-in request (or a cast started by a logged-in user) creates one.
+  A cast URL is bound to the Cast device's address (a copy used from any other machine gets 403) and revoked by
+  Stop or by the next cast. Over plain HTTP (casting) the URL and the video cross the LAN unencrypted, as with
+  plain RTSP.
 - `Access-Control-Allow-Origin: *` on `/hls/` responses only (hls.js pages, the Chromecast receiver);
   `/api/` never sends CORS headers.
 - The Host check (DNS rebinding) applies as for every page. The optional HTTP -> HTTPS redirect applies too:
@@ -80,7 +85,25 @@ Not implemented. LL-HLS needs blocking playlist reloads (`_HLS_msn` / `_HLS_part
 open until the next part exists). Every waiting player would then occupy one of the web server's 16 connection
 threads (6 per address) for up to a segment duration, the server closes every connection after one response
 (no keep-alive / HTTP/2), and Apple expects HTTP/2 for it. Latency today: hls.js and Safari start 3 segments
-from the live edge, about 6-8 s at 2 s segments. For low latency use the live view (WebSocket) or RTSP.
+from the live edge, about 6-8 s at 2 s segments. For low latency use the live view (WebSocket), RTSP, or
+live.mp4 below.
+
+## Low latency: live.mp4
+
+`/hls/<token>/live.mp4` (same tokens) is one endless HTTP response holding a fragmented MP4: `ftyp` + `moov`,
+then one `moof` + `mdat` per frame. For players that take a plain media URL (the Cast receiver, `<video src>`,
+VLC, mpv): they play frames as they arrive instead of holding three segments (the delay is then the player's own start-up buffer; for casting see the catch-up below).
+
+- Starts at the next keyframe produced after the request (not one already kept for other viewers): a player
+  never catches up with live, so every frame of pre-roll would stay as delay. The first frame comes within a
+  GOP (2 s by default).
+- A frame is sent when the next one arrives, with its real duration (the adaptive frame rate changes it): media
+  time keeps pace with the wall clock. A client that falls behind is skipped ahead to the newest keyframe (the
+  frame before the skip is shown longer), so delay does not build up. Video only, like the HLS stream.
+- No `Content-Length`, `Connection: close`, `Cache-Control: no-store`. At most 2 at once (503 after that):
+  each holds one of the web server's connection threads. Send timeout 10 s: a reader that stops is dropped.
+- Ends when the token expires or is revoked, when `hls.enabled` is switched off, or at shutdown. Does not
+  start the HLS segment producer.
 
 ## Players
 
@@ -106,14 +129,27 @@ for an IP address. **Play** makes the camera itself connect to the device and st
 
 - `cast.c` speaks Cast v2 over TLS to port 8009 (the device's self-signed certificate is not verified, like every
   sender): CONNECT, LAUNCH of the Default Media Receiver (CC1AD845), CONNECT to its transport, LOAD of
-  `http://<camera address on that network>/hls/<new token>/index.m3u8` (LIVE, fMP4), answers PINGs, reports
+  `http://<camera address on that network>/hls/<new token>/live.mp4` (`video/mp4`, LIVE), answers PINGs, reports
   PLAYING / LOAD_FAILED / LAUNCH_ERROR, then closes its connection without CLOSE (the receiver keeps playing, as
   after any sender app exits). Stop asks for the receiver status and stops only the Default Media Receiver session.
-- Start-up time: Play starts the HLS producer before connecting to the device, so the first segments are built
+- Catch-up (live.mp4): a receiver buffers a few seconds before it starts playing and then plays at normal speed,
+  so that buffer stays as delay (about 5 s on an Android TV). For up to 30 s after PLAYING the camera polls the
+  receiver's position (GET_STATUS) and compares it with the media time live.mp4 has sent. Above 1.5 s behind it
+  sends SEEK to 1 s behind the newest frame; if the receiver refuses it (INVALID_REQUEST) or the delay stays, it
+  sets the playback rate to 1.3 until 1 s behind, then back to 1.0 (also when the receiver reports BUFFERING).
+  The status line shows the result: `5.2 s behind -> 1.0 s: jumped ahead`. Stop or a new cast cancels the
+  catch-up at once (rate back to 1.0 first).
+- Format (`hls.cast_format`, the selector next to Play): `mp4` (default) = live.mp4, caught up to about 1 s behind live where the receiver allows it;
+  `hls` = the playlist (`application/x-mpegurl`, fMP4 segments), 6-8 s behind. If the device answers the MP4 LOAD
+  with LOAD_FAILED or a playback error, the camera loads HLS in the same session by itself (status: "refused the
+  low latency stream, trying HLS"); the status line says which format plays.
+- HLS start-up: Play starts the HLS producer before connecting to the device, so the first segments are built
   while the receiver app launches (a few seconds on a TV) instead of after its first playlist request (~4-5 s
   saved). The LOAD carries no `currentTime`, so a LIVE stream starts at the live edge, not at the oldest listed
   segment. Delay behind live is then the receiver's own buffer (about 3 segments, 6-8 s at the default GOP; a
   shorter `venc.gop` gives shorter segments and less delay, at some bitrate cost for every stream).
+- The token handed to the device works only from that device's address (port 8009 devices; a group's members
+  fetch the stream themselves, so group casts get an unbound token) and is revoked by Stop or the next cast.
 - Runs in one background thread (one job at a time; a second request gets 503), never on the web thread.
 - The device fetches the stream over plain HTTP: with the HTTP -> HTTPS redirect on, the cast is refused with that
   reason (a Chromecast does not trust the camera's own CA).

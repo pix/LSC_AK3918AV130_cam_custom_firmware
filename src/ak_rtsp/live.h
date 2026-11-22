@@ -39,6 +39,10 @@ void live_unsubscribe(void);
 int  live_next(live_cursor_t *c, uint8_t *buf, size_t cap, live_item_t *it, int timeout_ms);
 /* Pre-roll: rewind to the earliest keyframe within back_ms of the newest frame. */
 int  live_rewind(live_cursor_t *c, uint32_t back_ms);
+/* No pre-roll: the cursor starts at the next frame pushed (a zeroed cursor
+ * starts at the newest keyframe kept, up to a GOP old). For players that never
+ * catch up with live, where every frame of pre-roll stays as delay. */
+void live_skip_to_now(live_cursor_t *c);
 
 /* One-time token (32 hex chars, valid 60 s). 0 ok, -1 failure. */
 int  live_token_new(char out[33]);

@@ -19,7 +19,7 @@ static int fails, total;
 static int check(const char *t)
 {
     pthread_mutex_lock(&g_lock);
-    int r = tok_check(t, g_now);
+    int r = tok_check(t, g_now, 0x0100000a);   /* 10.0.0.1 */
     pthread_mutex_unlock(&g_lock);
     return r;
 }
@@ -30,6 +30,10 @@ static void test_paths(void)
         { "/hls/0123456789abcdef0123456789abcdef/index.m3u8", HLS_PLAYLIST, 0 },
         { "/hls/0123456789abcdef0123456789abcdef/index.m3u8?_HLS_msn=3", HLS_PLAYLIST, 0 },
         { "/hls/0123456789abcdef0123456789abcdef/init.mp4", HLS_INIT, 0 },
+        { "/hls/0123456789abcdef0123456789abcdef/live.mp4", HLS_LIVEMP4, 0 },
+        { "/hls/0123456789abcdef0123456789abcdef/live.mp4?x=1", HLS_LIVEMP4, 0 },
+        { "/hls/0123456789abcdef0123456789abcdef/live.mp4x", HLS_BAD, 0 },
+        { "/hls/0123456789abcdef0123456789abcdef/live.m4s", HLS_BAD, 0 },
         { "/hls/0123456789abcdef0123456789abcdef/seg0.m4s", HLS_SEGMENT, 0 },
         { "/hls/0123456789abcdef0123456789abcdef/seg7.m4s", HLS_SEGMENT, 7 },
         { "/hls/0123456789abcdef0123456789abcdef/seg4294967295.m4s", HLS_SEGMENT, 4294967295u },
@@ -94,6 +98,19 @@ static void test_tokens(void)
     CHECK(ok_all, "used every 100 s: valid for 24 h");
     g_now += 101;
     CHECK(!check(t[3]), "refused after 24 h");
+    /* bound to one client address (cast.c: the Cast device), revocation */
+    {
+        char b[33];
+        CHECK(hls_token_new_for(b, 0x0200000a) == 0, "token bound to 10.0.0.2");
+        CHECK(!check(b), "bound token refused from 10.0.0.1");
+        pthread_mutex_lock(&g_lock); int r = tok_check(b, g_now, 0x0200000a); pthread_mutex_unlock(&g_lock);
+        CHECK(r, "bound token accepted from 10.0.0.2");
+        hls_token_revoke(b);
+        pthread_mutex_lock(&g_lock); r = tok_check(b, g_now, 0x0200000a); pthread_mutex_unlock(&g_lock);
+        CHECK(!r, "revoked token refused");
+        hls_token_revoke(NULL); hls_token_revoke("short");
+        CHECK(check(t[4]) == check(t[4]), "revoke(NULL / bad length) is a no-op");
+    }
     /* 8 slots: a 9th token replaces the least recently used one */
     pthread_mutex_lock(&g_lock); memset(g_tok, 0, sizeof g_tok); pthread_mutex_unlock(&g_lock);
     for (int i = 0; i < HLS_TOKENS; i++) { CHECK(hls_token_new(t[i]) == 0, "slot token %d", i); }

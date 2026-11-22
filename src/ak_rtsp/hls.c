@@ -27,6 +27,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 /* ---- limits (memory budget: docs/hls.md) ---------------------------------- */
 #define HLS_IDLE_S         30            /* producer stops this long after the last request */
@@ -54,7 +56,7 @@ typedef struct { uint8_t *d; size_t n; uint32_t seq, dur90; int key; } seg_t;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cond = PTHREAD_COND_INITIALIZER;
 static int      s_enabled;              /* hls.enabled */
-static struct { char tok[33]; uint32_t made, last; int used; } g_tok[HLS_TOKENS];
+static struct { char tok[33]; uint32_t made, last, ip; int used; } g_tok[HLS_TOKENS];   /* ip: only that client (0: any) */
 static int      g_thread;               /* producer thread exists (until it has cleaned up) */
 static int      g_producing;            /* its session is live (segments may be served) */
 static int      g_stop_req;
@@ -70,6 +72,9 @@ static uint32_t g_target;               /* EXT-X-TARGETDURATION of this session 
 static uint64_t g_t90_next;             /* timeline: next session starts after the last one */
 static int64_t  g_ts_epoch = -1;        /* encoder ts of the first frame (timeline origin) */
 static uint32_t g_dropped;              /* segments lost to allocation failures */
+static int      g_mp4_n;                /* live.mp4 responses being sent */
+static struct { char tok[33]; int64_t started; uint64_t sent90; } g_mp4[HLS_MP4_MAX];   /* per stream: media sent */
+static int      s_cast_mp4 = 1;         /* hls.cast_format */
 
 /* ---- setting ------------------------------------------------------------------ */
 int hls_enabled(void) { return s_enabled; }
@@ -89,9 +94,21 @@ static int hls_en_set(const char *v, const char **e)
     return 0;
 }
 
+int hls_cast_mp4(void) { return s_cast_mp4; }
+
+static int hls_cf_get(char *o, size_t c) { snprintf(o, c, "%s", s_cast_mp4 ? "mp4" : "hls"); return 0; }
+static int hls_cf_set(const char *v, const char **e)
+{
+    if (!strcmp(v, "mp4")) s_cast_mp4 = 1;
+    else if (!strcmp(v, "hls")) s_cast_mp4 = 0;
+    else { *e = "must be mp4 or hls"; return -1; }
+    return 0;
+}
+
 void hls_register_params(void)
 {
     CTRL_REG("hls.enabled", hls_en, CTRL_PERSIST);
+    CTRL_REG("hls.cast_format", hls_cf, CTRL_PERSIST);
 }
 
 /* ---- tokens --------------------------------------------------------------------- */
@@ -102,7 +119,7 @@ static int tok_alive(int i, uint32_t now)       /* g_lock held */
     return now - g_tok[i].last <= (uint32_t)(g_tok[i].used ? HLS_TOK_IDLE_S : HLS_TOK_UNUSED_S);
 }
 
-int hls_token_new(char out[33])
+int hls_token_new_for(char out[33], uint32_t ip)
 {
     uint8_t r[16];
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
@@ -123,24 +140,57 @@ int hls_token_new(char out[33])
     memcpy(g_tok[slot].tok, out, 33);
     g_tok[slot].made = g_tok[slot].last = now;
     g_tok[slot].used = 0;
+    g_tok[slot].ip = ip;
     pthread_mutex_unlock(&g_lock);
     return 0;
 }
 
 /* Constant time over the token's bytes and over all slots. g_lock held. */
-static int tok_check(const char *tok, uint32_t now)
+static int tok_check(const char *tok, uint32_t now, uint32_t ip)
 {
     int found = -1;
     for (int i = 0; i < HLS_TOKENS; i++) {
         unsigned d = 0;
         for (int k = 0; k < 32; k++) d |= (unsigned char)(g_tok[i].tok[k] ^ tok[k]);
-        int hit = (d == 0) & tok_alive(i, now);
+        int hit = (d == 0) & tok_alive(i, now) & (g_tok[i].ip == 0 | g_tok[i].ip == ip);
         found = hit ? i : found;
     }
     if (found < 0) return 0;
     g_tok[found].last = now;
     g_tok[found].used = 1;
     return 1;
+}
+
+int hls_token_new(char out[33]) { return hls_token_new_for(out, 0); }
+
+void hls_token_revoke(const char *tok)
+{
+    if (!tok || strlen(tok) != 32) return;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < HLS_TOKENS; i++)
+        if (!strcmp(g_tok[i].tok, tok)) memset(&g_tok[i], 0, sizeof g_tok[i]);   /* a live.mp4 using it stops within 10 s */
+    pthread_mutex_unlock(&g_lock);
+}
+
+int hls_mp4_sent(const char *tok, double *secs)
+{
+    int found = -1;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < HLS_MP4_MAX; i++)
+        if (g_mp4[i].tok[0] && tok && !strcmp(g_mp4[i].tok, tok) && (found < 0 || g_mp4[i].started > g_mp4[found].started)) found = i;
+    if (found >= 0) *secs = (double)g_mp4[found].sent90 / 90000.0;
+    pthread_mutex_unlock(&g_lock);
+    return found >= 0 ? 0 : -1;
+}
+
+/* IPv4 address of the client (network order), 0 if unknown. */
+static uint32_t peer_ip(conn_t *cn)
+{
+    struct sockaddr_in a;
+    socklen_t l = sizeof a;
+    memset(&a, 0, sizeof a);
+    if (getpeername(cn->fd, (struct sockaddr *)&a, &l) != 0 || a.sin_family != AF_INET) return 0;
+    return a.sin_addr.s_addr;
 }
 
 /* ---- paths ---------------------------------------------------------------------- */
@@ -156,6 +206,7 @@ int hls_parse_path(const char *p, char tok[33], uint32_t *seq)
     int kind = HLS_BAD;
     if (n == 10 && !strncmp(f, "index.m3u8", 10)) kind = HLS_PLAYLIST;
     else if (n == 8 && !strncmp(f, "init.mp4", 8)) kind = HLS_INIT;
+    else if (n == 8 && !strncmp(f, "live.mp4", 8)) kind = HLS_LIVEMP4;
     else if (n >= 8 && n <= 17 && !strncmp(f, "seg", 3) && !strncmp(f + n - 4, ".m4s", 4)) {
         uint64_t v = 0;
         size_t i;
@@ -442,6 +493,106 @@ static const seg_t *find_locked(uint32_t seq)
     return NULL;
 }
 
+/* ---- live.mp4: one endless fragmented MP4 -------------------------------------- */
+#define MP4_KEY_WAIT_MS  9000           /* first keyframe (GOP 2 s; idle frame rate stretches it) */
+#define MP4_TOK_EVERY_MS 10000          /* re-check the token (revoked by hls.enabled=off, 24 h max) */
+#define MP4_MAX_GAP_MS   5000           /* a frame shown longer than this is a hub skip: cap it */
+
+typedef struct { conn_t *cn; int err; } mp4out_t;
+
+static ssize_t mp4_write(void *ck, const char *buf, size_t n)
+{
+    mp4out_t *o = ck;
+    if (!o->err && conn_send_all(o->cn, buf, n) != 0) o->err = 1;   /* SO_SNDTIMEO: a stuck reader is dropped */
+    return (ssize_t)n;
+}
+
+/* g_lock NOT held. A fragment per frame, flushed when the next frame arrives
+ * (its duration is then known: the adaptive frame rate changes it). Starts at
+ * the next keyframe, not one kept in the hub, so nothing old is queued in the
+ * player. A reader that falls behind is skipped ahead by the hub (live.h); the
+ * frame before the skip is shown longer, so media time keeps up with real time. */
+static void serve_mp4(conn_t *cn, const char *tok, uint32_t ip)
+{
+    pthread_mutex_lock(&g_lock);
+    int busy = g_mp4_n >= HLS_MP4_MAX;
+    int slot = -1;
+    if (!busy) {
+        g_mp4_n++;
+        for (int i = 0; i < HLS_MP4_MAX && slot < 0; i++) if (!g_mp4[i].tok[0]) slot = i;
+        if (slot >= 0) { snprintf(g_mp4[slot].tok, sizeof g_mp4[slot].tok, "%s", tok); g_mp4[slot].started = mono_ms(); g_mp4[slot].sent90 = 0; }
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (busy) { reply_text(cn, 503, "Service Unavailable", "too many live.mp4 streams\n"); return; }
+
+    uint8_t *frame = malloc(LIVE_MAX_FRAME);
+    live_item_t *it = malloc(sizeof *it);
+    mp4out_t o = { cn, 0 };
+    cookie_io_functions_t io;
+    memset(&io, 0, sizeof io);
+    io.write = mp4_write;
+    FILE *f = frame && it ? fopencookie(&o, "w", io) : NULL;
+    if (f) setvbuf(f, NULL, _IOFBF, 16 << 10);   /* one send per fragment (no tiny writes) */
+    fmp4_t *mux = NULL;
+    live_cursor_t cur = { 0, 0 };
+    uint64_t last_ts = 0;
+    int64_t t0 = mono_ms(), tok_at = t0;
+    int sent_head = 0;
+    if (f) { live_subscribe(); live_skip_to_now(&cur); }   /* next keyframe, not one kept in the hub */
+    while (f && !o.err) {
+        int64_t now = mono_ms();
+        pthread_mutex_lock(&g_lock);
+        int run = s_enabled && !g_stop_req;
+        if (run && now - tok_at >= MP4_TOK_EVERY_MS) { run = tok_check(tok, mono_s(), ip); tok_at = now; }
+        pthread_mutex_unlock(&g_lock);
+        if (!run) break;
+        if (live_next(&cur, frame, LIVE_MAX_FRAME, it, 500) != LIVE_VIDEO) {
+            if (!mux && now - t0 >= MP4_KEY_WAIT_MS) break;
+            continue;
+        }
+        if (!mux) {
+            if (!it->key) {
+                if (now - t0 >= MP4_KEY_WAIT_MS) break;
+                venc_request_idr();                  /* no-op unless smart encoding (long GOPs) */
+                continue;
+            }
+            static const char head[] =
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: video/mp4\r\n"
+                "Cache-Control: no-store\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
+                "X-Content-Type-Options: nosniff\r\n"
+                "Referrer-Policy: no-referrer\r\n"
+                "Connection: close\r\n\r\n";
+            if (conn_send_all(cn, head, sizeof head - 1) != 0) break;
+            sent_head = 1;
+            mux = fmp4_open(f, frame, it->len, 0);
+            if (!mux) break;                         /* headers sent: just end the response */
+        } else {
+            uint64_t d = it->ts > last_ts ? it->ts - last_ts : 1;
+            if (d > MP4_MAX_GAP_MS) d = MP4_MAX_GAP_MS;
+            fmp4_set_last_duration(mux, (uint32_t)(d * 90));
+            if (fmp4_flush(mux) != 0) break;
+            pthread_mutex_lock(&g_lock);
+            if (slot >= 0) g_mp4[slot].sent90 = fmp4_video_time(mux);   /* cast.c: how far behind the player is */
+            pthread_mutex_unlock(&g_lock);
+        }
+        if (fflush(f) != 0) break;
+        if (fmp4_video(mux, frame, it->len, it->key, it->ts) != 0) break;
+        last_ts = it->ts;
+    }
+    if (f) live_unsubscribe();
+    if (mux) fmp4_close(mux);                        /* last frame (ignored if the client left) */
+    if (!sent_head && (!f || !o.err)) reply_text(cn, 503, "Service Unavailable", "no video yet, retry\n");
+    if (f) fclose(f);
+    free(frame); free(it);
+    pthread_mutex_lock(&g_lock);
+    g_mp4_n--;
+    if (slot >= 0) memset(&g_mp4[slot], 0, sizeof g_mp4[slot]);
+    pthread_cond_broadcast(&g_cond);
+    pthread_mutex_unlock(&g_lock);
+}
+
 void hls_serve(conn_t *cn, const char *path)
 {
     char tok[33];
@@ -450,11 +601,12 @@ void hls_serve(conn_t *cn, const char *path)
     if (kind == HLS_BAD) { reply_text(cn, 404, "Not Found", "not found\n"); return; }
     pthread_mutex_lock(&g_lock);
     if (!s_enabled) { pthread_mutex_unlock(&g_lock); reply_text(cn, 403, "Forbidden", "HLS is off (hls.enabled)\n"); return; }
-    if (!tok_check(tok, mono_s())) {
+    if (!tok_check(tok, mono_s(), peer_ip(cn))) {
         pthread_mutex_unlock(&g_lock);
         reply_text(cn, 403, "Forbidden", "invalid or expired HLS token\n");
         return;
     }
+    if (kind == HLS_LIVEMP4) { pthread_mutex_unlock(&g_lock); serve_mp4(cn, tok, peer_ip(cn)); return; }   /* no HLS producer needed */
     g_last_req = mono_s();
     ensure_running_locked();
 
@@ -523,10 +675,17 @@ int hls_status_json(char *out, size_t cap)
     int n = snprintf(out, cap,
         "{\"enabled\":%s,\"running\":%s,\"session\":%u,\"segments\":%d,\"bytes\":%zu,\"building\":%zu,"
         "\"init\":%zu,\"peak_bytes\":%zu,\"limit_bytes\":%u,\"target\":%u,\"first\":%u,\"next\":%u,"
-        "\"tokens\":%d,\"dropped\":%u,\"idle_s\":%u}",
+        "\"tokens\":%d,\"dropped\":%u,\"idle_s\":%u,\"mp4_streams\":%d,\"cast_format\":\"%s\",\"mp4_sent\":[",
         s_enabled ? "true" : "false", g_producing ? "true" : "false", g_session, g_nseg, g_seg_bytes,
         g_building, g_init_len, g_peak, (unsigned)(HLS_MEM_MAX + HLS_SEG_MAX_BYTES), g_target,
-        g_nseg ? g_seg[0].seq : 0, g_next_seq, ntok, g_dropped, g_thread ? now - g_last_req : 0);
+        g_nseg ? g_seg[0].seq : 0, g_next_seq, ntok, g_dropped, g_thread ? now - g_last_req : 0,
+        g_mp4_n, s_cast_mp4 ? "mp4" : "hls");
+    for (int i = 0, first = 1; i < HLS_MP4_MAX && n > 0 && (size_t)n < cap; i++)
+        if (g_mp4[i].tok[0]) {          /* seconds of media sent by each live.mp4 stream (no token) */
+            n += snprintf(out + n, cap - (size_t)n, "%s%.3f", first ? "" : ",", (double)g_mp4[i].sent90 / 90000.0);
+            first = 0;
+        }
+    if (n > 0 && (size_t)n < cap) n += snprintf(out + n, cap - (size_t)n, "]}");
     pthread_mutex_unlock(&g_lock);
     return n < 0 ? 0 : (size_t)n < cap ? n : (int)cap - 1;
 }
@@ -536,7 +695,7 @@ void hls_stop(void)
     pthread_mutex_lock(&g_lock);
     g_stop_req = 1;
     pthread_cond_broadcast(&g_cond);
-    while (g_thread) wait_locked(200);
+    while (g_thread || g_mp4_n) wait_locked(200);    /* live.mp4 senders stop at their next frame */
     free_ring_locked();
     memset(g_tok, 0, sizeof g_tok);
     g_stop_req = 0;

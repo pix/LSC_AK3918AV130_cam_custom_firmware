@@ -306,6 +306,71 @@ def ffprobe(path, min_secs):
     return 0 if not errs else 1
 
 
+def livemp4(url, secs, name, out=None, slack=0.6):
+    """Read the endless live.mp4 for secs seconds like a player would (no
+    faster than it arrives) and check: ftyp + moov first; then moof+mdat, one
+    frame each, the first a keyframe; tfdt contiguous (each fragment starts
+    where the previous ended); media time keeps pace with the wall clock
+    (nothing old dumped at the start, no drift): |media - wall| <= slack."""
+    errs = []
+    t0 = time.time()
+    try:
+        r = urllib.request.urlopen(url, timeout=20)
+    except Exception as e:
+        print(f"FAIL livemp4 {name}: {e}"); return 1
+    ctype = r.headers.get("Content-Type", ""); clen = r.headers.get("Content-Length")
+    if ctype != "video/mp4": errs.append(f"Content-Type {ctype}")
+    if clen is not None: errs.append(f"Content-Length {clen} on an endless stream")
+    if r.headers.get("Access-Control-Allow-Origin") != "*": errs.append("no CORS header")
+    sink = open(out, "wb") if out else None
+    def box():
+        h = r.read(8)
+        if len(h) < 8: return None, None
+        n, t = struct.unpack(">I4s", h)
+        body = r.read(n - 8) if n >= 8 else b""
+        if sink: sink.write(h + body)
+        return t.decode("latin-1"), body
+    first_byte = None; types = []; frags = 0; next_dec = None; t_first = None; dec0 = None
+    lead = lag = 0.0; scale = 90000; keyfirst = None; durs = []; trace = []
+    while time.time() - t0 < secs:
+        t, b = box()
+        if t is None: errs.append("stream ended"); break
+        if first_byte is None: first_byte = time.time() - t0
+        if len(types) < 2: types.append(t)
+        if t == "moov":
+            m = b.find(b"mdhd")
+            if m > 0: scale = struct.unpack(">I", b[m + 16:m + 20])[0] if b[m + 4] == 0 else struct.unpack(">I", b[m + 24:m + 28])[0]
+        if t != "moof": continue
+        o = b.find(b"tfdt"); tr = b.find(b"trun")
+        if o < 0 or tr < 0: errs.append("moof without tfdt/trun"); continue
+        dec = struct.unpack(">Q", b[o + 8:o + 16])[0]
+        n = struct.unpack(">I", b[tr + 8:tr + 12])[0]
+        if n != 1: errs.append(f"fragment {frags}: {n} samples (want 1)")
+        dur, _, fl = struct.unpack(">III", b[tr + 16:tr + 28])
+        if keyfirst is None: keyfirst = fl == 0x02000000
+        if next_dec is not None and dec != next_dec: errs.append(f"fragment {frags}: tfdt {dec}, expected {next_dec}")
+        next_dec = dec + dur; durs.append(dur); frags += 1
+        now = time.time()
+        if t_first is None: t_first, dec0 = now, dec
+        media = (dec - dec0) / scale; wall = now - t_first
+        lead = max(lead, media - wall); lag = max(lag, wall - media); trace.append((wall, wall - media))
+    r.close()
+    if sink: sink.close()
+    if types[:2] != ["ftyp", "moov"]: errs.append(f"starts with {types}")
+    if not keyfirst: errs.append("first fragment is not a keyframe")
+    if frags < 10: errs.append(f"only {frags} fragments")
+    # the newest frame is sent when the one after it arrives: one frame of lag is normal
+    if lead > slack: errs.append(f"media ran {lead:.2f} s ahead of the wall clock (backlog dumped)")
+    if lag > slack + (max(durs) / scale if durs else 0): errs.append(f"media fell {lag:.2f} s behind the wall clock")
+    st = "PASS" if not errs else "FAIL"
+    print(f"{st} livemp4 {name}: {frags} fragments, first byte {first_byte or 0:.2f} s, "
+          f"max lead {lead:.2f} s, max lag {lag:.2f} s, end lag {trace[-1][1] if trace else 0:.2f} s, "
+          f"lag per 5 s: {' '.join(f'{max(l for w, l in trace if k * 5 <= w < k * 5 + 5):.2f}' for k in range(int(trace[-1][0] // 5) + 1) if any(k * 5 <= w < k * 5 + 5 for w, l in trace)) if trace else ''}, "
+          f"durations {min(durs, default=0)}..{max(durs, default=0)}"
+          + "".join(f"\n  {e}" for e in errs[:8]))
+    return 0 if not errs else 1
+
+
 def slow(url, rate):
     u = urllib.parse.urlsplit(url)
     s = socket.socket()
@@ -352,6 +417,9 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "client": sys.exit(client(sys.argv[2], float(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else "1"))
     if cmd == "ffprobe": sys.exit(ffprobe(sys.argv[2], float(sys.argv[3])))
+    if cmd == "livemp4": sys.exit(livemp4(sys.argv[2], float(sys.argv[3]), sys.argv[4],
+                                          sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != "-" else None,
+                                          float(sys.argv[6]) if len(sys.argv) > 6 else 0.6))
     if cmd == "slow": slow(sys.argv[2], float(sys.argv[3])); sys.exit(0)
     if cmd == "get": get(sys.argv[2]); sys.exit(0)
     if cmd == "tfdt": tfdt(sys.argv[2]); sys.exit(0)

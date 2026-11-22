@@ -29,39 +29,56 @@ same decloud setup as the original project (only `bin/ak_rtsp` in the APP partit
 
 ![Web admin page: live view with overlay and image settings](docs/screenshots/overview.jpg)
 
-- **Login everywhere:** HTTP and RTSP Digest, per-IP login backoff, reset button (10 s) or SD file to restore `admin/admin`.
-- **Web admin page** (port 80, HTTPS 443): live view with audio and push-to-talk, snapshot, image settings,
-  day/night and IR, overlay, motion zones, recordings browser, Wi-Fi (with rollback), time/NTP,
-  health, settings backup/restore, optional development terminal.
+- **Login everywhere:** HTTP and RTSP Digest, per-IP login backoff, reset button (hold 10 s) or a
+  `reset_auth` file on the SD card to restore `admin/admin`.
+- **Web admin page** (port 80, HTTPS 443): live view with audio and push-to-talk, snapshot, full screen, image
+  settings, day/night and IR, overlay, motion zones, recordings browser, Wi-Fi scan (with rollback), NTP server
+  and time zone, camera name, health (uptime, load, memory, temperature, Wi-Fi signal, last crash), dark theme
+  and phone layout.
+- **Setup and maintenance:** Wi-Fi from a phone's "Share Wi-Fi" QR code held in front of the lens (press the
+  reset button 3 times; automatic when no Wi-Fi is saved) or a `wifi.txt` on the SD card; all settings backed up
+  to and restored from one file (Wi-Fi optional); optional development terminal (root shell in the browser,
+  off by default, sessions logged).
 - **HTTPS and RTSPS** (port 322) with an on-camera CA, your own uploaded certificate (DNS names or IP
   addresses) or a Let's Encrypt / ACME certificate renewed by the camera (DNS-01 via Cloudflare, DuckDNS or
-  acme-dns, or HTTP-01), see [`https-certificates.md`](docs/ak_rtsp-auth/https-certificates.md); reverse proxy
-  support (Traefik, see `docs/ak_rtsp-auth/traefik.md`).
-- **Streams:** 1080p main stream and a 640x360 sub stream (`/sub`), up to 4 RTSP/RTSPS sessions; optional
-  **HLS** (Safari, hls.js, VLC, smart TVs) and **casting to a Chromecast / Android TV started by the camera
-  itself**, so it works from any browser, Firefox included ([`hls.md`](docs/ak_rtsp-auth/hls.md)).
-- **Burned-in overlay:** date/time, day/night tag, frame rate and custom text drawn by the ISP.
+  acme-dns, or HTTP-01), see [`https-certificates.md`](docs/ak_rtsp-auth/https-certificates.md); optional
+  HTTP to HTTPS redirect, Host check against DNS rebinding, reverse proxy support with `X-Forwarded-For`
+  ([`traefik.md`](docs/ak_rtsp-auth/traefik.md)).
+- **Streams:** 1080p main stream and an optional 640x360 sub stream (`/sub`, also an ONVIF profile), up to 4
+  RTSP/RTSPS sessions; bitrate (256-4096 kbps) and keyframe interval, RTSP audio as G.711 µ-law or L16.
+- **HLS and casting** ([`hls.md`](docs/ak_rtsp-auth/hls.md)): optional HLS (Safari, hls.js, VLC, smart TVs) on
+  a private token URL, and **casting to a Chromecast / Android TV started by the camera itself**, so it works
+  from any browser, Firefox included: a low-latency `live.mp4` stream, the TV's start-up buffer caught up
+  automatically (target: 1 s behind live), fallback to HLS when the TV refuses it; the cast URL only works from
+  that TV and Stop revokes it.
+- **Burned-in overlay:** date/time, day/night tag, frame rate and custom text before/after, in any corner and
+  two sizes, drawn by the ISP.
 - **Less storage:** adaptive frame rate (idle at 10/5/3 fps, full rate on motion in the zones or anywhere,
   about 70% less at 5 fps), smart encoding (long GOP / long-term reference), H.264 High profile.
 - **Picture:** brightness, contrast, saturation and sharpness behave like the stock app (re-derived from its
-  disassembly), plus WDR, noise reduction strength, anti-flicker, flip/mirror and privacy masks.
+  disassembly), plus WDR, noise reduction strength, anti-flicker, flip/mirror, JPEG quality of snapshots and
+  up to 4 privacy masks (solid colour or mosaic).
 - **Day/night:** stock soft photosensor algorithm or exposure-based, IR LED auto/on/off, light level.
-- **Events:** motion (software or ISP statistics, zones, minimum object size, persistence, light-change
-  rejection, line crossing, loitering: [`motion.md`](docs/ak_rtsp-auth/motion.md)), sound level, tamper
-  (covered/moved), delivered to MQTT (Home Assistant discovery, TLS with pinning or client certificates), a
-  webhook and ONVIF.
-- **Push notifications** with the snapshot and an optional short video clip: ntfy, Telegram, Pushover, Discord
-  (webhook or bot) and Gotify, with a per-time-window limit
-  ([`notifications.md`](docs/ak_rtsp-auth/notifications.md)).
+- **Events:** motion (software or ISP statistics, zones with their own sensitivity, minimum object size,
+  persistence, light-change rejection, line crossing, loitering: [`motion.md`](docs/ak_rtsp-auth/motion.md)),
+  sound level (ignores the camera's own speaker), tamper (covered/moved), delivered to MQTT (Home Assistant
+  discovery with sensors for temperature, light and Wi-Fi signal, controls and a last-motion picture; TLS with
+  pinning or client certificates), a JSON webhook and ONVIF.
+- **Push notifications** on motion, sound, tamper, line crossing or loitering, with the snapshot and an optional
+  short video clip: ntfy, Telegram, Pushover, Discord (webhook or bot) and Gotify, with a quiet time per event
+  type and a per-time-window limit ([`notifications.md`](docs/ak_rtsp-auth/notifications.md)).
 - **ONVIF** (Profile S subset): discovery, media profiles, snapshot, imaging, events (PullPoint),
   audio back-channel; checked against what Home Assistant's ONVIF integration does. Optional **Profile G**:
   NVRs can search and replay the SD recordings ([`onvif-profile-g.md`](docs/ak_rtsp-auth/onvif-profile-g.md)).
-- **SD card recording:** continuous or event-based fragmented MP4, pre/post-event buffer, timelapse, weekly
-  schedules, privacy hours, retention by free space and age.
-- **Speaker:** chimes, custom sound, webhook-triggered sounds, talk-back from the browser.
-- **Microphone:** echo cancellation (SpeexDSP) with voice ducking so phone talk-back does not howl, mute while
-  playing, gain, AGC, noise gate.
-- **Status LED** activity feedback, microphone gain.
+- **SD card recording:** on motion, sound, either, or continuously, as fragmented MP4 with event pictures,
+  pre/post-event buffer, daily timelapse video, retention by free space and age; weekly hour schedules for
+  recording, alerts and privacy (picture blacked out, microphone muted, no detection or recording); a
+  recordings page to filter, play, download as .tar and delete.
+- **Speaker:** volume, chime, custom sound and test tone, sounds or your own WAV played through a token
+  webhook (Home Assistant, scripts), talk-back from the browser and the ONVIF back-channel.
+- **Microphone:** echo cancellation (SpeexDSP) with voice ducking so phone talk-back does not howl, howling
+  suppression, mute while playing (always or auto), mute switch, gain, AGC, noise gate.
+- **Status LED:** on/off, fast blink on motion and/or slow blink while recording.
 
 ### Screenshots
 The camera picture is replaced by cat photos.
@@ -403,6 +420,7 @@ This fork's `ak_rtsp`:
 - [HLS and casting](docs/ak_rtsp-auth/hls.md)
 - [ONVIF Profile G (recording search and replay)](docs/ak_rtsp-auth/onvif-profile-g.md)
 - [Behind a reverse proxy (Traefik)](docs/ak_rtsp-auth/traefik.md)
+- [Reverse-engineering notes (day/night, SVP2, H.265, hardware spec)](docs/ak_rtsp-auth/re/)
 
 ---
 

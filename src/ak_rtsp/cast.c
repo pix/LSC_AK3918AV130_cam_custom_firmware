@@ -140,6 +140,26 @@ int cast_find_app(const char *js, const char *appid, char *tr, size_t tcap, char
     return -1;
 }
 
+int cast_media_status(const char *js, char *state, size_t cap, double *cur, long *msid)
+{
+    const char *st = obj_get(js, "status");
+    if (cap) state[0] = 0;
+    *msid = -1;
+    if (!st || *st != '[') return -1;
+    st = ws(st + 1);
+    if (*st != '{') return -1;
+    cast_json_str(st, "playerState", state, cap);
+    char *e = NULL;
+    const char *v = obj_get(st, "mediaSessionId");
+    long id = v ? strtol(v, &e, 10) : -1;
+    *msid = v && e != v && id >= 0 ? id : -1;            /* set even without currentTime */
+    v = obj_get(st, "currentTime");
+    double d = v ? strtod(v, &e) : 0;
+    if (!v || e == v || !(d >= 0 && d < 1e9)) return -1;
+    *cur = d;
+    return 0;
+}
+
 void cast_player_state(const char *js, char *out, size_t cap)
 {
     const char *st = obj_get(js, "status");
@@ -303,6 +323,7 @@ static int  g_busy;
 static char g_state[16] = "idle";
 static char g_msg[200];
 static char g_device[32];
+static char g_cast_tok[33];             /* token handed to the device we cast to last (g_lock) */
 static cast_dev_t g_dev[MAX_DEV];
 static int  g_ndev;
 static struct { int kind; char ip[16]; int port; } g_job;
@@ -393,6 +414,126 @@ static void json_escape(char *out, size_t cap, const char *s)
     out[n] = 0;
 }
 
+/* LOAD the camera stream in the receiver session se (escaped). mp4: live.mp4,
+ * an endless fragmented MP4 the receiver plays as plain media (~1 s behind
+ * live); else the HLS playlist (~3 segments behind). No currentTime: LIVE
+ * starts at the live edge. 0 ok. */
+static int send_load(conn_t *c, const char *transport, const char *se, const char *local, const char *tok,
+                     int mp4, int req, char *out, size_t cap)
+{
+    char url[128];
+    const char *file = mp4 ? "live.mp4" : "index.m3u8";
+    if (WEB_PORT == 80) snprintf(url, sizeof url, "http://%s/hls/%s/%s", local, tok, file);
+    else snprintf(url, sizeof url, "http://%s:%d/hls/%s/%s", local, WEB_PORT, tok, file);
+    if (mp4)
+        snprintf(out, cap,
+            "{\"type\":\"LOAD\",\"requestId\":%d,\"sessionId\":\"%s\",\"autoplay\":true,"
+            "\"media\":{\"contentId\":\"%s\",\"contentUrl\":\"%s\",\"contentType\":\"video/mp4\","
+            "\"streamType\":\"LIVE\",\"metadata\":{\"metadataType\":0,\"title\":\"Camera live\"}}}", req, se, url, url);
+    else
+        snprintf(out, cap,
+            "{\"type\":\"LOAD\",\"requestId\":%d,\"sessionId\":\"%s\",\"autoplay\":true,"
+            "\"media\":{\"contentId\":\"%s\",\"contentUrl\":\"%s\",\"contentType\":\"application/x-mpegurl\","
+            "\"streamType\":\"LIVE\",\"hlsSegmentFormat\":\"fmp4\",\"hlsVideoSegmentFormat\":\"fmp4\","
+            "\"metadata\":{\"metadataType\":0,\"title\":\"Camera live\"}}}", req, se, url, url);
+    return send_msg(c, transport, NS_MEDIA, out);
+}
+
+/* ---- catch-up (live.mp4) --------------------------------------------------------
+ * A Cast receiver buffers a few seconds before it starts playing, then plays
+ * at normal speed: that buffer stays as delay (measured: ~5 s on an Android TV).
+ * After PLAYING the camera compares the player's position with the media time
+ * live.mp4 has sent (hls_mp4_sent) and, above LAG_MAX, asks the player to SEEK
+ * to LAG_TARGET behind the newest frame; if it refuses or the delay stays, it
+ * plays at CATCHUP_RATE until LAG_TARGET, then back to 1.0 (also on BUFFERING,
+ * cancel, or after TUNE_MS). The result goes to the status message. */
+#define TUNE_MS        30000
+#define TUNE_SETTLE_MS 2000            /* PLAYING this long before measuring */
+#define SEEK_CHECK_MS  4000
+#define LAG_MAX        1.5
+#define LAG_TARGET     1.0
+#define CATCHUP_RATE   "1.3"
+
+static int g_tuning, g_cancel;         /* g_lock: catch-up running / asked to stop */
+
+static int tune_cancelled(void)
+{
+    pthread_mutex_lock(&g_lock);
+    int c = g_cancel;
+    pthread_mutex_unlock(&g_lock);
+    return c;
+}
+
+static void tune(conn_t *c, unsigned char *buf, char *json, char *out, const char *transport, const char *tok, long msid)
+{
+    enum { MEASURE, SEEKING, RATE, DONE } st = MEASURE;
+    int64_t start = mono_ms(), next_q = start, ping = start + 5000, seek_at = 0, playing_since = 0;
+    double first = -1, lag = -1;
+    int rid = 10, rate_on = 0, refused = 0;
+    const char *how = "";
+    pthread_mutex_lock(&g_lock);
+    g_tuning = 1;
+    pthread_mutex_unlock(&g_lock);
+    while (st != DONE && mono_ms() - start < TUNE_MS && !tune_cancelled()) {
+        int64_t now = mono_ms();
+        if (now >= ping) { send_msg(c, "receiver-0", NS_HEART, "{\"type\":\"PING\"}"); ping = now + 5000; }
+        if (now >= next_q) {
+            snprintf(out, 1024, "{\"type\":\"GET_STATUS\",\"requestId\":%d,\"mediaSessionId\":%ld}", rid++, msid);
+            if (send_msg(c, transport, NS_MEDIA, out)) break;
+            next_q = now + 700;
+        }
+        cast_msg_t m;
+        int r = recv_msg(c, buf, json, &m, 200);
+        if (r < 0) break;
+        if (r == 0) continue;
+        char type[40] = "", ps[24];
+        cast_json_str(json, "type", type, sizeof type);
+        if (!strcmp(m.ns, NS_HEART)) {
+            if (!strcmp(type, "PING")) send_msg(c, m.src[0] ? m.src : "receiver-0", NS_HEART, "{\"type\":\"PONG\"}");
+            continue;
+        }
+        if (strcmp(m.ns, NS_MEDIA)) continue;
+        if (st == SEEKING && (!strcmp(type, "INVALID_REQUEST") || !strcmp(type, "INVALID_PLAYER_STATE"))) refused = 1;   /* SEEK refused: decide now */
+        if (strcmp(type, "MEDIA_STATUS") && !(st == SEEKING && refused)) continue;
+        double cur = 0, sent = 0;
+        long id = -1;
+        int have = !strcmp(type, "MEDIA_STATUS") && cast_media_status(json, ps, sizeof ps, &cur, &id) == 0 && hls_mp4_sent(tok, &sent) == 0;
+        if (have) {
+            lag = sent - cur;
+            if (!strcmp(ps, "PLAYING")) { if (!playing_since) playing_since = now; }
+            else if (strcmp(ps, "BUFFERING")) playing_since = 0;
+        }
+        if (st == MEASURE) {
+            if (!have || !playing_since || now - playing_since < TUNE_SETTLE_MS) continue;
+            first = lag;
+            if (lag <= LAG_MAX) { how = "no catch-up needed"; st = DONE; break; }
+            snprintf(out, 1024, "{\"type\":\"SEEK\",\"requestId\":%d,\"mediaSessionId\":%ld,\"currentTime\":%.3f,"
+                     "\"resumeState\":\"PLAYBACK_START\"}", rid++, msid, sent - LAG_TARGET);
+            if (send_msg(c, transport, NS_MEDIA, out)) break;
+            st = SEEKING; seek_at = now;
+            set_state("playing", "playing on %s (low latency MP4, %.1f s behind: catching up)", g_device, first);
+        } else if (st == SEEKING) {
+            if (!refused && now - seek_at < SEEK_CHECK_MS) continue;
+            if (have && !refused && lag <= LAG_MAX && !strcmp(ps, "PLAYING")) { how = "jumped ahead"; st = DONE; break; }
+            snprintf(out, 1024, "{\"type\":\"SET_PLAYBACK_RATE\",\"requestId\":%d,\"mediaSessionId\":%ld,\"playbackRate\":" CATCHUP_RATE "}", rid++, msid);
+            if (send_msg(c, transport, NS_MEDIA, out)) break;
+            rate_on = 1; st = RATE;
+        } else if (st == RATE && have) {
+            if (lag <= LAG_TARGET) { how = "played faster for a moment"; st = DONE; }
+            else if (!strcmp(ps, "BUFFERING")) { how = "stopped catching up (the TV ran out of data)"; st = DONE; }
+        }
+    }
+    if (rate_on) {
+        snprintf(out, 1024, "{\"type\":\"SET_PLAYBACK_RATE\",\"requestId\":%d,\"mediaSessionId\":%ld,\"playbackRate\":1}", rid++, msid);
+        send_msg(c, transport, NS_MEDIA, out);
+    }
+    if (st != DONE && !*how) how = tune_cancelled() ? "catch-up cancelled" : "the TV did not catch up";
+    if (first >= 0) set_state("playing", "playing on %s (low latency MP4, %.1f s behind -> %.1f s: %s)", g_device, first, lag, how);
+    pthread_mutex_lock(&g_lock);
+    g_tuning = 0; g_cancel = 0;
+    pthread_mutex_unlock(&g_lock);
+}
+
 static void do_cast(const char *ip, int port, int stop)
 {
     char err[160] = "", local[16] = "", tok[33];
@@ -402,7 +543,16 @@ static void do_cast(const char *ip, int port, int stop)
     if (!stop) {
         if (!hls_enabled()) { set_state("error", "HLS is off (hls.enabled)"); return; }
         if (tls_redirect()) { set_state("error", "the HTTP->HTTPS redirect is on: a Chromecast does not trust the camera's own certificate; turn the redirect off to cast"); return; }
-        hls_warm();     /* segments build while the receiver app starts (saves ~4 s) */
+    }
+    int mp4 = hls_cast_mp4();
+    if (!stop && !mp4) hls_warm();     /* HLS: segments build while the receiver app starts (saves ~4 s) */
+    {   /* one cast at a time: the URL handed out before stops working (Stop, or a new cast) */
+        char old[33];
+        pthread_mutex_lock(&g_lock);
+        snprintf(old, sizeof old, "%s", g_cast_tok);
+        g_cast_tok[0] = 0;
+        pthread_mutex_unlock(&g_lock);
+        hls_token_revoke(old);
     }
     set_state("connecting", "%s", g_device);
     int fd = tcp_connect_to(ip, port, 5000, err, sizeof err);
@@ -421,8 +571,9 @@ static void do_cast(const char *ip, int port, int stop)
         set_state("error", "%s closed the connection", g_device); goto done;
     }
     if (!stop) set_state("launching", "starting the media receiver on %s", g_device);
-    char transport[64] = "", session[64] = "", type[40], ps[24];
+    char transport[64] = "", session[64] = "", type[40], ps[24], se[80] = "";
     int loaded = 0, ok = 0;
+    long msid = -1;                       /* mediaSessionId (catch-up) */
     int64_t deadline = mono_ms() + CAST_WAIT_MS, ping = mono_ms() + 5000;
     while (mono_ms() < deadline && !ok) {
         cast_msg_t m;
@@ -453,38 +604,45 @@ static void do_cast(const char *ip, int port, int stop)
                 set_state("stopped", "stopped the media receiver on %s", g_device);
                 ok = 1;
             } else if (found && !loaded) {
-                if (!local[0] || hls_token_new(tok) != 0) { set_state("error", "cannot create an HLS token"); goto done; }
-                char url[128], tr[80], se[80];
-                if (WEB_PORT == 80) snprintf(url, sizeof url, "http://%s/hls/%s/index.m3u8", local, tok);
-                else snprintf(url, sizeof url, "http://%s:%d/hls/%s/index.m3u8", local, WEB_PORT, tok);
-                json_escape(tr, sizeof tr, transport);
+                /* bound to the device (a group's members fetch the stream themselves: port 8009 only) */
+                struct in_addr dev = { 0 };
+                if (port != 8009 || inet_pton(AF_INET, ip, &dev) != 1) dev.s_addr = 0;
+                if (!local[0] || hls_token_new_for(tok, dev.s_addr) != 0) { set_state("error", "cannot create an HLS token"); goto done; }
+                pthread_mutex_lock(&g_lock);
+                snprintf(g_cast_tok, sizeof g_cast_tok, "%s", tok);
+                pthread_mutex_unlock(&g_lock);
                 json_escape(se, sizeof se, session);
-                snprintf(out, 1024,
-                    "{\"type\":\"LOAD\",\"requestId\":2,\"sessionId\":\"%s\",\"autoplay\":true,"   /* no currentTime: LIVE starts at the live edge */
-                    "\"media\":{\"contentId\":\"%s\",\"contentUrl\":\"%s\",\"contentType\":\"application/x-mpegurl\","
-                    "\"streamType\":\"LIVE\",\"hlsSegmentFormat\":\"fmp4\",\"hlsVideoSegmentFormat\":\"fmp4\","
-                    "\"metadata\":{\"metadataType\":0,\"title\":\"Camera live\"}}}", se, url, url);
                 if (send_msg(c, transport, NS_CONN, "{\"type\":\"CONNECT\",\"userAgent\":\"ak_rtsp\"}") ||
-                    send_msg(c, transport, NS_MEDIA, out)) { set_state("error", "%s closed the connection", g_device); goto done; }
+                    send_load(c, transport, se, local, tok, mp4, 2, out, 1024)) { set_state("error", "%s closed the connection", g_device); goto done; }
                 loaded = 1;
-                set_state("loading", "%s is loading http://%s/hls/...", g_device, local);
+                set_state("loading", "%s is loading http://%s/hls/... (%s)", g_device, local, mp4 ? "low latency MP4" : "HLS");
             }
         } else if (!strcmp(m.ns, NS_MEDIA)) {
-            if (!strcmp(type, "LOAD_FAILED") || !strcmp(type, "LOAD_CANCELLED") || !strcmp(type, "INVALID_REQUEST")) {
-                set_state("error", "%s could not play the stream (%s)", g_device, type); goto done;
-            }
-            if (!strcmp(type, "MEDIA_STATUS")) {
+            int failed = 0;
+            if (!strcmp(type, "LOAD_FAILED") || !strcmp(type, "LOAD_CANCELLED") || !strcmp(type, "INVALID_REQUEST")) failed = 1;
+            else if (!strcmp(type, "MEDIA_STATUS")) {
                 cast_player_state(json, ps, sizeof ps);
-                if (!strcmp(ps, "PLAYING")) { set_state("playing", "playing on %s", g_device); ok = 1; }
+                { double cur; long id = -1; char s2[24]; cast_media_status(json, s2, sizeof s2, &cur, &id); if (id >= 0) msid = id; }
+                if (!strcmp(ps, "PLAYING")) { set_state("playing", "playing on %s (%s)", g_device, mp4 ? "low latency MP4" : "HLS"); ok = 1; }
                 else if (!strcmp(ps, "IDLE")) {
                     char why[32] = "";
                     const char *st = obj_get(json, "status");
                     if (st && *st == '[') cast_json_str(ws(st + 1), "idleReason", why, sizeof why);
-                    if (!strcmp(why, "ERROR")) { set_state("error", "%s could not play the stream", g_device); goto done; }
+                    if (!strcmp(why, "ERROR")) { failed = 1; snprintf(type, sizeof type, "ERROR"); }
                 } else if (ps[0]) set_state("loading", "%s: %s", g_device, ps);
+            }
+            if (failed && mp4 && loaded) {             /* the receiver cannot play live.mp4: same session, HLS */
+                mp4 = 0;
+                hls_warm();
+                if (send_load(c, transport, se, local, tok, 0, 3, out, 1024)) { set_state("error", "%s closed the connection", g_device); goto done; }
+                set_state("loading", "%s refused the low latency stream (%s), trying HLS", g_device, type);
+                deadline = mono_ms() + CAST_WAIT_MS;
+            } else if (failed) {
+                set_state("error", "%s could not play the stream (%s)", g_device, type); goto done;
             }
         }
     }
+    if (ok && mp4 && msid >= 0) tune(c, buf, json, out, transport, tok, msid);   /* the receiver's start-up buffer */
     if (!ok) {
         pthread_mutex_lock(&g_lock);
         int loading = !strcmp(g_state, "loading");
@@ -567,6 +725,10 @@ static void *worker(void *arg)
 static int start_job(int kind, const char *ip, int port)
 {
     pthread_mutex_lock(&g_lock);
+    if (g_busy && g_tuning) {           /* only catching up: Stop / a new cast cancels it (it polls every 200 ms) */
+        g_cancel = 1;
+        for (int i = 0; i < 20 && g_busy; i++) { pthread_mutex_unlock(&g_lock); usleep(100000); pthread_mutex_lock(&g_lock); }
+    }
     if (g_busy) { pthread_mutex_unlock(&g_lock); return -1; }
     g_busy = 1;
     g_job.kind = kind;

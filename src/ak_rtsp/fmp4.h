@@ -18,6 +18,10 @@ int  fmp4_video(fmp4_t *m, const uint8_t *annexb, size_t len, int key, uint64_t 
 int  fmp4_audio(fmp4_t *m, const int16_t *pcm, size_t n, uint64_t t8);
 /* Write the buffered fragment. */
 int  fmp4_flush(fmp4_t *m);
+/* Duration (90 kHz) of the last buffered video frame, for a fragment flushed
+ * before the next frame is known (one frame per fragment: hls.c live.mp4).
+ * Without it the last frame repeats the previous duration. */
+void fmp4_set_last_duration(fmp4_t *m, uint32_t d90);
 /* Flush and free (does not close the FILE). */
 void fmp4_close(fmp4_t *m);
 uint64_t fmp4_video_start_ms(const fmp4_t *m);   /* ts of the first video frame */

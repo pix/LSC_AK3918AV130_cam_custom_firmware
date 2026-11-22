@@ -4,7 +4,8 @@ _googlecast._tcp. On LOAD it fetches the HLS stream like a real device
 (playlist, init, first segment -> MEDIA_STATUS PLAYING) and then plays it for
 a while with hls_check.py. Every event goes to <log> as JSON lines.
 
-  fake_cast.py <port> <cert.pem> <key.pem> <log> [--behavior ok|launch_error|load_failed] [--mdns <ip>]
+  fake_cast.py <port> <cert.pem> <key.pem> <log> [--behavior ok|launch_error|load_failed|mp4_refused|noseek|nocatchup]
+               [--mdns <ip>] [--preroll <s>] [--play-secs <s>]
                [--launch-delay <s>]   (seconds the receiver app takes to start, like a real TV)
 """
 import json, os, socket, ssl, struct, subprocess, sys, threading, time, urllib.request, uuid
@@ -13,6 +14,8 @@ port, cert, key, logf = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 behavior = sys.argv[sys.argv.index("--behavior") + 1] if "--behavior" in sys.argv else "ok"
 mdns_ip = sys.argv[sys.argv.index("--mdns") + 1] if "--mdns" in sys.argv else None
 launch_delay = float(sys.argv[sys.argv.index("--launch-delay") + 1]) if "--launch-delay" in sys.argv else 0.0
+preroll = float(sys.argv[sys.argv.index("--preroll") + 1]) if "--preroll" in sys.argv else 0.0      # live.mp4 start-up buffer
+play_secs = float(sys.argv[sys.argv.index("--play-secs") + 1]) if "--play-secs" in sys.argv else 16.0
 HERE = os.path.dirname(os.path.abspath(__file__))
 lock = threading.Lock()
 apps = []                                   # running receiver apps
@@ -80,14 +83,93 @@ def receiver_status(req):
         "volume": {"level": 1.0, "muted": False}}, "type": "RECEIVER_STATUS"}
 
 
+player = {}                                 # the live.mp4 player model (plock)
+plock = threading.Lock()
+
+
+def player_pos(now):
+    """Position of the modelled player: advances at its rate, never past the
+    media received (then BUFFERING until more arrives). plock held."""
+    p = player; have = p["rec"]["media"]
+    pos = p["pos0"] + p["rate"] * (now - p["t_ref"])
+    if pos >= have:
+        p["pos0"], p["t_ref"] = have, now
+        return have, "BUFFERING"
+    return pos, "PLAYING"
+
+
+def media_cmd(send, msg, t, p):
+    """GET_STATUS / SEEK / SET_PLAYBACK_RATE on the media channel."""
+    def reply(payload): send(msg["dst"], msg["src"], NS_MEDIA, payload)
+    with plock:
+        now = time.time()
+        if not player.get("rec"):
+            reply({"type": "MEDIA_STATUS", "requestId": p.get("requestId", 0), "status": []}); return
+        pos, st = player_pos(now)
+        if t == "SEEK":
+            if behavior in ("noseek", "nocatchup"):
+                reply({"type": "INVALID_REQUEST", "requestId": p.get("requestId", 0), "reason": "INVALID_COMMAND"}); return
+            x = max(0.0, min(float(p.get("currentTime", pos)), player["rec"]["media"]))
+            player.update(pos0=x, t_ref=now); player["seeks"].append(round(x, 2))
+        elif t == "SET_PLAYBACK_RATE":
+            if behavior == "nocatchup":
+                reply({"type": "INVALID_REQUEST", "requestId": p.get("requestId", 0), "reason": "INVALID_COMMAND"}); return
+            r = float(p.get("playbackRate", 1))
+            player.update(pos0=pos, t_ref=now, rate=r); player["rates"].append(r)
+        pos, st = player_pos(now)
+        reply({"type": "MEDIA_STATUS", "requestId": p.get("requestId", 0), "status": [
+            {"mediaSessionId": 1, "playerState": st, "currentTime": round(pos, 3), "playbackRate": player["rate"]}]})
+
+
 def play(conn, send, msg):
     p = msg["payload"]; media = p.get("media", {})
     url = media.get("contentId", "")
     log(ev="load", media=media, keys=sorted(p), sessionId=p.get("sessionId"), dst=msg["dst"])
-    if behavior == "load_failed":
+    is_mp4 = media.get("contentType") == "video/mp4"
+    if behavior == "load_failed" or (behavior == "mp4_refused" and is_mp4):
         send(msg["dst"], msg["src"], NS_MEDIA, {"type": "LOAD_FAILED", "requestId": p.get("requestId")}); return
     send(msg["dst"], msg["src"], NS_MEDIA, {"type": "MEDIA_STATUS", "requestId": p.get("requestId"),
                                              "status": [{"mediaSessionId": 1, "playerState": "BUFFERING", "media": media}]})
+    if is_mp4:          # plain media element: one endless GET; a player that buffers --preroll s before playing
+        rec = {"first": None, "media": 0.0, "frags": 0, "keyfirst": None, "types": [], "err": None, "cors": None}
+
+        def reader():
+            try:
+                r = urllib.request.urlopen(url, timeout=20); rec["cors"] = r.headers.get("Access-Control-Allow-Origin")
+                dec0, t_end = None, time.time() + play_secs
+                while time.time() < t_end:
+                    h = r.read(8)
+                    if len(h) < 8: break
+                    n, ty = struct.unpack(">I4s", h); b = r.read(n - 8)
+                    if len(rec["types"]) < 2: rec["types"].append(ty.decode("latin-1"))
+                    if ty != b"moof": continue
+                    o = b.find(b"tfdt"); tr = b.find(b"trun")
+                    dec = struct.unpack(">Q", b[o + 8:o + 16])[0]; dur, _, fl = struct.unpack(">III", b[tr + 16:tr + 28])
+                    if dec0 is None: dec0 = dec; rec["keyfirst"] = fl == 0x02000000; rec["first"] = time.time()
+                    rec["media"] = (dec + dur - dec0) / 90000; rec["frags"] += 1
+                r.close()
+            except Exception as e:
+                rec["err"] = str(e)
+        th = threading.Thread(target=reader, daemon=True); t0 = time.time(); th.start()
+        while rec["first"] is None and rec["err"] is None and time.time() - t0 < 15: time.sleep(0.05)
+        if rec["first"] is None:
+            log(ev="fetch_failed", error=rec["err"] or "no frame")
+            send(msg["dst"], msg["src"], NS_MEDIA, {"type": "MEDIA_STATUS", "requestId": 0,
+                                                     "status": [{"mediaSessionId": 1, "playerState": "IDLE", "idleReason": "ERROR"}]})
+            return
+        log(ev="fetched", mp4=True, first_ms=int((rec["first"] - t0) * 1000), segment=1, cors=rec["cors"])
+        time.sleep(preroll)                     # the start-up buffer: this much delay unless the sender catches up
+        with plock:
+            player.update(pos0=0.0, t_ref=time.time(), rate=1.0, rec=rec, seeks=[], rates=[])
+        send(msg["dst"], msg["src"], NS_MEDIA, {"type": "MEDIA_STATUS", "requestId": 0, "status": [
+            {"mediaSessionId": 1, "playerState": "PLAYING", "currentTime": 0, "playbackRate": 1, "media": media}]})
+        th.join()
+        ok = rec["types"][:2] == ["ftyp", "moov"] and rec["keyfirst"] and rec["frags"] >= 10
+        with plock:
+            seeks, rates = list(player.get("seeks", [])), list(player.get("rates", []))
+        log(ev="played", result=("PASS" if ok else "FAIL") + f" fake player: {rec['frags']} fragments, {rec['media']:.1f} s media,"
+            f" starts {rec['types']}, keyframe first {rec['keyfirst']}", seeks=seeks, rates=rates)
+        return
     try:
         t0 = time.time()
         pl = urllib.request.urlopen(url, timeout=20).read().decode()
@@ -156,6 +238,8 @@ def handle(raw):
                         apps[:] = [a for a in apps if a["sessionId"] != p.get("sessionId")]
                     log(ev="stop", sessionId=p.get("sessionId"), matched=ok)
                     send("receiver-0", msg["src"], NS_RECV, receiver_status(p.get("requestId")))
+                elif msg["ns"] == NS_MEDIA and t in ("GET_STATUS", "SEEK", "SET_PLAYBACK_RATE"):
+                    media_cmd(send, msg, t, p)
                 elif msg["ns"] == NS_MEDIA and t == "LOAD":
                     threading.Thread(target=play, args=(conn, send, msg), daemon=True).start()
     except Exception as e:

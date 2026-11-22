@@ -16,9 +16,7 @@
  *   3  an mDNS answer for cast_parse_mdns(); names must come out sanitised.
  * Build: tests/fuzz/build_fuzzer.sh tests/fuzz/fuzz_hls.c <fuzz build dir> */
 #include "hls.c"
-#ifdef FUZZ_CAST              /* cast.c is only on the feat/hls branch (not merged): -DFUZZ_CAST there */
 #include "cast.h"
-#endif
 #include <assert.h>
 
 static int g_init_done;
@@ -57,7 +55,7 @@ static void fuzz_path(const uint8_t *d, size_t n)
             assert(!strncmp(f, want, strlen(want)));
         }
         pthread_mutex_lock(&g_lock);
-        tok_check(tok, mono_s());
+        tok_check(tok, mono_s(), n ? (uint32_t)d[0] : 0);
         pthread_mutex_unlock(&g_lock);
     }
     free(s);
@@ -93,7 +91,6 @@ static void fuzz_ring(const uint8_t *d, size_t n)
     pthread_mutex_unlock(&g_lock);
 }
 
-#ifdef FUZZ_CAST
 static void fuzz_cast_msg(const uint8_t *d, size_t n)
 {
     cast_msg_t m;
@@ -109,6 +106,10 @@ static void fuzz_cast_msg(const uint8_t *d, size_t n)
             assert(strlen(t) < sizeof t);
             if (cast_find_app(js, "CC1AD845", tr, sizeof tr, se, sizeof se) == 0) assert(tr[0] && strlen(tr) < sizeof tr);
             cast_player_state(js, ps, sizeof ps);
+            double cur = -1;
+            long id = -2;
+            if (cast_media_status(js, ps, sizeof ps, &cur, &id) == 0) assert(cur >= 0 && cur < 1e9);
+            assert(id >= -1 && strlen(ps) < sizeof ps);
             free(js);
         }
     }
@@ -140,7 +141,6 @@ static void fuzz_mdns(const uint8_t *d, size_t n)
         for (const char *p = model; *p; p++) assert(*p != '"' && *p != '\\' && (unsigned char)*p >= 0x20);
     }
 }
-#endif
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 {
@@ -149,12 +149,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
     switch (d[0] % 4) {
     case 0: fuzz_path(d + 1, n - 1); break;
     case 1: fuzz_ring(d + 1, n - 1); break;
-#ifdef FUZZ_CAST
     case 2: fuzz_cast_msg(d + 1, n - 1); break;
     default: fuzz_mdns(d + 1, n - 1); break;
-#else
-    default: fuzz_path(d + 1, n - 1); break;
-#endif
     }
     return 0;
 }

@@ -177,6 +177,14 @@ int live_rewind(live_cursor_t *c, uint32_t back_ms)
     return best ? 0 : -1;
 }
 
+void live_skip_to_now(live_cursor_t *c)
+{
+    pthread_mutex_lock(&g_lock);
+    c->want = g_next_seq;                       /* never 0: live_next waits for it */
+    c->awant = g_anext;
+    pthread_mutex_unlock(&g_lock);
+}
+
 /* ---- tokens ---------------------------------------------------------------- */
 static struct { char tok[33]; uint32_t until; } g_tok[4];
 

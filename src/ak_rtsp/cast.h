@@ -32,6 +32,9 @@ int cast_json_str(const char *obj, const char *key, char *out, size_t cap);
 int cast_find_app(const char *json, const char *appid, char *transport, size_t tcap, char *session, size_t scap);
 /* Media status: playerState of the first entry ("" if none). */
 void cast_player_state(const char *json, char *out, size_t cap);
+/* Media status, first entry: playerState, currentTime (s), mediaSessionId
+ * (-1 if absent). 0 ok, -1 no entry or no valid currentTime. */
+int cast_media_status(const char *json, char *state, size_t cap, double *cur, long *msid);
 /* mDNS answer -> device fields (name from TXT fn=, model md=, port from SRV,
  * address from an A record or src_ip). 0 if it describes a Cast device. */
 int cast_parse_mdns(const unsigned char *p, size_t n, const char *src_ip,

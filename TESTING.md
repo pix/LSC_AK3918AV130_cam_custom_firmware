@@ -31,7 +31,7 @@ command against it, stops it with SIGTERM and appends the ASan/LSan/valgrind ver
 | `tests/tls/acme/run.sh` (`VALGRIND=1`) | own-certificate checks (wrong key, chain order, expired, CA, key types and sizes…), certificate selection by SNI/IP, ACME against Pebble and mock DNS APIs |
 | `tests/motion/run.sh` | `md_logic.c` against the old decision, synthetic scenes for every option, line crossing / loitering replay |
 | `tests/notify/run.sh <dir> asan\|valgrind` | ntfy / Telegram / Pushover / Discord / Gotify against local stand-ins: limits, pictures, clips, failures |
-| `tests/hls/run.sh <dir> <video> <work> [valgrind]` | playlists/segments, tokens, concurrent clients, HTTPS, casting to a fake Chromecast (start-up time, live edge) |
+| `tests/hls/run.sh <dir> <video> <work> [valgrind]` | playlists/segments, tokens (bound, revoked), concurrent clients, HTTPS, live.mp4 (keeps pace with real time), casting to a fake Chromecast (MP4, HLS, fallback, start-up time, live edge) |
 | `tests/onvif/profile_g.sh <dir> <video> <venv> [valgrind]` | Profile G search/replay with onvif-zeep-async, RTSP replay with ffmpeg |
 | `tests/fuzz/*.c` + `build_fuzzer.sh` | libFuzzer harnesses for every parser: HTTP requests and handlers, Digest, RTSP, ONVIF (S and G), MQTT, PEM, backup archives, fMP4 muxer/reader, HLS paths, notifications, motion settings, QR, WAV, OSD… |
 
@@ -137,5 +137,5 @@ they take the camera address as first argument or `CAMERA_IP`.
 - RTSP over UDP: ffmpeg sometimes warns once about a non-monotonic audio timestamp (one 32 ms packet) when the
   first RTCP Sender Report arrives; it corrects it and plays on. TCP is not affected.
 - The sensor is 1920×1080 at most (GC20C3): there is no 2K mode to unlock.
-- Casting: the receiver keeps about 3 HLS segments of delay (6-8 s at the default GOP); use the live view or RTSP
-  for real time.
+- Casting: about 1 s behind live with the default low latency stream; devices that refuse it get HLS, which keeps
+  about 3 segments of delay (6-8 s at the default GOP).

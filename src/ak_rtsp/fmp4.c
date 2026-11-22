@@ -240,6 +240,11 @@ int fmp4_audio(fmp4_t *m, const int16_t *pcm, size_t n, uint64_t t8)
     return m->adata.err ? -1 : 0;
 }
 
+void fmp4_set_last_duration(fmp4_t *m, uint32_t d90)
+{
+    if (m && m->nvs) m->vs[m->nvs - 1].dur = d90;
+}
+
 int fmp4_flush(fmp4_t *m)
 {
     if (!m->nvs && !m->nas) return 0;

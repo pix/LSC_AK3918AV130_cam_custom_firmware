@@ -265,6 +265,7 @@ input[type=number]{width:90px;height:36px;font:inherit;padding:0 10px;border:1px
     <div class="stream" id="castrow" style="padding-top:0" hidden>
       <span class="slabel">Cast</span><select id="castdev" aria-label="Cast device" style="flex:1;min-width:140px;height:28px"></select>
       <input type="text" id="castip" placeholder="or IP address" aria-label="Cast device address" style="width:130px;height:28px">
+      <select id="castfmt" aria-label="Cast format" title="Low latency: about 1 s behind live. HLS: 6-8 s, for devices that refuse the low latency stream (the camera falls back to HLS by itself)." style="height:28px"><option value="mp4">Low latency</option><option value="hls">HLS</option></select>
       <button class="sm" id="castgo">Play</button><button class="sm" id="caststop">Stop</button>
       <span class="muted" id="castmsg" style="flex-basis:100%"></span>
     </div>
@@ -1671,7 +1672,7 @@ $("#sub_en").addEventListener("change",async()=>{const on=$("#sub_en").checked;
     if(confirm(`Restart now to ${on?"start":"stop"} the second stream? Video stops for about a minute.`)){await post("/api/reboot");toast("Restarting…")}
     else toast("Second stream "+(on?"on":"off")+" after the next restart")}catch(e){toast(e.message,true)}});
 /* ---- HLS stream address and casting (hls.enabled; hls.c, cast.c) ---- */
-async function loadHls(){try{const c=await cfgGet("hls.");const on=c["hls.enabled"]==="on";$("#hls_en").checked=on;$("#hlsrow").hidden=!on;if(!on)$("#castrow").hidden=true}catch(e){}}
+async function loadHls(){try{const c=await cfgGet("hls.");const on=c["hls.enabled"]==="on";if(c["hls.cast_format"])$("#castfmt").value=c["hls.cast_format"];$("#hls_en").checked=on;$("#hlsrow").hidden=!on;if(!on)$("#castrow").hidden=true}catch(e){}}
 $("#hls_en").addEventListener("change",async()=>{const on=$("#hls_en").checked;
   try{await cfgSet({"hls.enabled":onoff(on)});toast("HLS stream "+(on?"on":"off: every address handed out stops working"));loadHls()}catch(e){toast(e.message,true)}});
 $("#hlsbtn").addEventListener("click",async()=>{try{const t=await getJSON("/api/hls/token"),u=location.origin+t.url,a=$("#hls");
@@ -1688,6 +1689,7 @@ async function castPost(p,data){try{await post("/api/hls/cast"+p,data);clearTime
 function castTarget(){const v=$("#castip").value.trim()||$("#castdev").value,[host,port]=v.split(":");
   if(!host){toast("Choose a device or enter its IP address",true);return null}return{host,port:port||"8009"}}
 $("#castbtn").addEventListener("click",()=>{const r=$("#castrow");r.hidden=!r.hidden;if(!r.hidden)castPost("/discover")});
+$("#castfmt").addEventListener("change",()=>setParam("hls.cast_format",$("#castfmt").value,"Cast format"));
 $("#castgo").addEventListener("click",()=>{const t=castTarget();if(t)castPost("",t)});
 $("#caststop").addEventListener("click",()=>{const t=castTarget();if(t)castPost("/stop",t)});
 loadHls();
