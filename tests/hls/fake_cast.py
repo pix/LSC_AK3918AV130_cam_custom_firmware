@@ -91,6 +91,8 @@ def player_pos(now):
     """Position of the modelled player: advances at its rate, never past the
     media received (then BUFFERING until more arrives). plock held."""
     p = player; have = p["rec"]["media"]
+    if now < p["t_ref"]:                    # still filling the start-up buffer
+        return p["pos0"], "BUFFERING"
     pos = p["pos0"] + p["rate"] * (now - p["t_ref"])
     if pos >= have:
         p["pos0"], p["t_ref"] = have, now
@@ -109,6 +111,7 @@ def media_cmd(send, msg, t, p):
         if t == "SEEK":
             if behavior in ("noseek", "nocatchup"):
                 reply({"type": "INVALID_REQUEST", "requestId": p.get("requestId", 0), "reason": "INVALID_COMMAND"}); return
+            if now < player["t_ref"]: player["early"] = player.get("early", 0) + 1   # during the start-up buffer (a real TV got stuck)
             x = max(0.0, min(float(p.get("currentTime", pos)), player["rec"]["media"]))
             player.update(pos0=x, t_ref=now); player["seeks"].append(round(x, 2))
         elif t == "SET_PLAYBACK_RATE":
@@ -158,17 +161,17 @@ def play(conn, send, msg):
                                                      "status": [{"mediaSessionId": 1, "playerState": "IDLE", "idleReason": "ERROR"}]})
             return
         log(ev="fetched", mp4=True, first_ms=int((rec["first"] - t0) * 1000), segment=1, cors=rec["cors"])
-        time.sleep(preroll)                     # the start-up buffer: this much delay unless the sender catches up
+        # like an Android TV: PLAYING at once, then BUFFERING at position 0 for the start-up buffer, then playing
         with plock:
-            player.update(pos0=0.0, t_ref=time.time(), rate=1.0, rec=rec, seeks=[], rates=[])
+            player.update(pos0=0.0, t_ref=time.time() + preroll, rate=1.0, rec=rec, seeks=[], rates=[])
         send(msg["dst"], msg["src"], NS_MEDIA, {"type": "MEDIA_STATUS", "requestId": 0, "status": [
             {"mediaSessionId": 1, "playerState": "PLAYING", "currentTime": 0, "playbackRate": 1, "media": media}]})
         th.join()
         ok = rec["types"][:2] == ["ftyp", "moov"] and rec["keyfirst"] and rec["frags"] >= 10
         with plock:
-            seeks, rates = list(player.get("seeks", [])), list(player.get("rates", []))
+            seeks, rates, early = list(player.get("seeks", [])), list(player.get("rates", [])), player.get("early", 0)
         log(ev="played", result=("PASS" if ok else "FAIL") + f" fake player: {rec['frags']} fragments, {rec['media']:.1f} s media,"
-            f" starts {rec['types']}, keyframe first {rec['keyfirst']}", seeks=seeks, rates=rates)
+            f" starts {rec['types']}, keyframe first {rec['keyfirst']}", seeks=seeks, rates=rates, early_seeks=early)
         return
     try:
         t0 = time.time()

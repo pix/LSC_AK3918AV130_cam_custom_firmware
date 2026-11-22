@@ -1021,11 +1021,12 @@ static int handle_conn(conn_t *cn, req_t *in, const struct sockaddr *peer)
         int n = snprintf(json, sizeof(json), "{\"token\":\"%s\",\"url\":\"/hls/%s/index.m3u8\"}", tok, tok);
         respond(cn, 200, "OK", "application/json", NULL, json, (size_t)n);
     } else if (is_get && !strcmp(path, "/api/hls")) {
-        char json[512];
+        static char json[2048];                                  /* handlers are serialised (g_web_lock) */
         int n = hls_status_json(json, sizeof(json));
         respond(cn, 200, "OK", "application/json", NULL, json, (size_t)n);
     } else if (!strncmp(path, "/api/hls/cast", 13)) {          /* cast.c: the camera casts to a Chromecast */
-        char host[48] = "", port[8] = "", json[2048];
+        char host[48] = "", port[8] = "";
+        static char json[12288];                                 /* devices + trace; serialised (g_web_lock) */
         form_get(r.body, "host", host, sizeof(host));
         form_get(r.body, "port", port, sizeof(port));
         int code = cast_api(is_post, path + 13, host, atoi(port), json, sizeof(json));

@@ -440,21 +440,46 @@ static int send_load(conn_t *c, const char *transport, const char *se, const cha
 }
 
 /* ---- catch-up (live.mp4) --------------------------------------------------------
- * A Cast receiver buffers a few seconds before it starts playing, then plays
- * at normal speed: that buffer stays as delay (measured: ~5 s on an Android TV).
- * After PLAYING the camera compares the player's position with the media time
- * live.mp4 has sent (hls_mp4_sent) and, above LAG_MAX, asks the player to SEEK
- * to LAG_TARGET behind the newest frame; if it refuses or the delay stays, it
- * plays at CATCHUP_RATE until LAG_TARGET, then back to 1.0 (also on BUFFERING,
- * cancel, or after TUNE_MS). The result goes to the status message. */
-#define TUNE_MS        30000
-#define TUNE_SETTLE_MS 2000            /* PLAYING this long before measuring */
-#define SEEK_CHECK_MS  4000
+ * A Cast receiver buffers before it starts playing, then plays at normal speed:
+ * that buffer stays as delay. Measured on an Android TV (2020/2021 UHD): PLAYING
+ * at position 0, ~6 s of BUFFERING, then playing 8 s behind. SEEK does not help
+ * there (an endless stream is not seekable: it went back ~1.3 s), so the camera
+ * changes the playback rate instead: once the receiver really plays (PLAYING
+ * and the position moving, TUNE_SETTLE_MS) it compares the position with the
+ * media time live.mp4 has sent (hls_mp4_sent); above LAG_MAX it plays at
+ * RATE_FAST down to LAG_SLOW, at RATE_SLOW down to LAG_TARGET, then 1.0 (also
+ * when the receiver stops playing, on cancel, or after TUNE_MS of playing).
+ * There 1.3x took the delay from 10.8 s to 1.5 s in 31 s without buffering. */
+#define TUNE_WAIT_MS   30000           /* for the receiver to really start playing */
+#define TUNE_MS        60000           /* of playing: catch-up budget */
+#define TUNE_SETTLE_MS 2000            /* PLAYING with the position moving this long before measuring */
 #define LAG_MAX        1.5
+#define LAG_SLOW       3.0
 #define LAG_TARGET     1.0
-#define CATCHUP_RATE   "1.3"
+#define RATE_FAST      "1.5"
+#define RATE_SLOW      "1.2"
+#define TRACE_AFTER_MS 10000           /* keep watching (trace only) after deciding */
 
 static int g_tuning, g_cancel;         /* g_lock: catch-up running / asked to stop */
+
+/* What the receiver did during the last cast (GET /api/hls/cast "trace"):
+ * [t, playerState, position, media sent, event], t = camera monotonic s. */
+#define TRACE_N 128
+static struct { double t, cur, sent; char st[12], ev[20]; } g_tr[TRACE_N];
+static int g_ntr;
+
+static void trace(const char *ev, const char *st, double cur, double sent)
+{
+    pthread_mutex_lock(&g_lock);
+    if (g_ntr < TRACE_N) {
+        g_tr[g_ntr].t = (double)mono_ms() / 1000.0;
+        g_tr[g_ntr].cur = cur; g_tr[g_ntr].sent = sent;
+        snprintf(g_tr[g_ntr].st, sizeof g_tr[g_ntr].st, "%s", st ? st : "");
+        snprintf(g_tr[g_ntr].ev, sizeof g_tr[g_ntr].ev, "%s", ev ? ev : "");
+        g_ntr++;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
 
 static int tune_cancelled(void)
 {
@@ -464,17 +489,31 @@ static int tune_cancelled(void)
     return c;
 }
 
+static int send_rate(conn_t *c, const char *transport, char *out, int *rid, long msid, const char *rate)
+{
+    snprintf(out, 1024, "{\"type\":\"SET_PLAYBACK_RATE\",\"requestId\":%d,\"mediaSessionId\":%ld,\"playbackRate\":%s}",
+             (*rid)++, msid, rate);
+    char ev[20];
+    snprintf(ev, sizeof ev, "rate %s", rate);
+    trace(ev, "", -1, -1);
+    return send_msg(c, transport, NS_MEDIA, out);
+}
+
 static void tune(conn_t *c, unsigned char *buf, char *json, char *out, const char *transport, const char *tok, long msid)
 {
-    enum { MEASURE, SEEKING, RATE, DONE } st = MEASURE;
-    int64_t start = mono_ms(), next_q = start, ping = start + 5000, seek_at = 0, playing_since = 0;
+    enum { MEASURE, FAST, SLOW, DONE } st = MEASURE;
+    int64_t start = mono_ms(), next_q = start, ping = start + 5000, playing_since = 0;
+    int64_t stop_at = start + TUNE_WAIT_MS;    /* then TUNE_MS once playing; after DONE TRACE_AFTER_MS of watching */
     double first = -1, lag = -1;
-    int rid = 10, rate_on = 0, refused = 0;
+    int rid = 10, rate_on = 0;
+    double last_cur = 0;
+    char last_ps[24] = "-";
+    int64_t last_tr = 0;
     const char *how = "";
     pthread_mutex_lock(&g_lock);
     g_tuning = 1;
     pthread_mutex_unlock(&g_lock);
-    while (st != DONE && mono_ms() - start < TUNE_MS && !tune_cancelled()) {
+    while (mono_ms() < stop_at && !tune_cancelled()) {
         int64_t now = mono_ms();
         if (now >= ping) { send_msg(c, "receiver-0", NS_HEART, "{\"type\":\"PING\"}"); ping = now + 5000; }
         if (now >= next_q) {
@@ -493,40 +532,62 @@ static void tune(conn_t *c, unsigned char *buf, char *json, char *out, const cha
             continue;
         }
         if (strcmp(m.ns, NS_MEDIA)) continue;
-        if (st == SEEKING && (!strcmp(type, "INVALID_REQUEST") || !strcmp(type, "INVALID_PLAYER_STATE"))) refused = 1;   /* SEEK refused: decide now */
-        if (strcmp(type, "MEDIA_STATUS") && !(st == SEEKING && refused)) continue;
+        if (strcmp(type, "MEDIA_STATUS")) {                                          /* INVALID_REQUEST, ... */
+            trace(type, "", -1, -1);
+            if (rate_on && st != DONE && (!strcmp(type, "INVALID_REQUEST") || !strcmp(type, "INVALID_PLAYER_STATE"))) {
+                how = "the TV refused to play faster"; st = DONE; rate_on = 0; stop_at = now + TRACE_AFTER_MS;
+            }
+            continue;
+        }
         double cur = 0, sent = 0;
         long id = -1;
-        int have = !strcmp(type, "MEDIA_STATUS") && cast_media_status(json, ps, sizeof ps, &cur, &id) == 0 && hls_mp4_sent(tok, &sent) == 0;
+        int pos = cast_media_status(json, ps, sizeof ps, &cur, &id) == 0;
+        int snt = hls_mp4_sent(tok, &sent) == 0;
+        int have = pos && snt;
+        if (strcmp(ps, last_ps) || now - last_tr >= 1000) {         /* trace: changes, at most 1/s otherwise */
+            trace("", ps, pos ? cur : -1, snt ? sent : -1);
+            snprintf(last_ps, sizeof last_ps, "%s", ps);
+            last_tr = now;
+        }
         if (have) {
             lag = sent - cur;
-            if (!strcmp(ps, "PLAYING")) { if (!playing_since) playing_since = now; }
-            else if (strcmp(ps, "BUFFERING")) playing_since = 0;
+            /* "Playing" = PLAYING with the position moving: at start-up a receiver says PLAYING for a moment, then
+             * BUFFERING at position 0 while it fills its start-up buffer (seen on an Android TV: ~5 s). */
+            if (!strcmp(ps, "PLAYING") && cur > 0.05 && cur > last_cur) { if (!playing_since) playing_since = now; }
+            else if (strcmp(ps, "PLAYING")) playing_since = 0;
+            last_cur = cur;
         }
+        int ready = playing_since && now - playing_since >= TUNE_SETTLE_MS;
+        if (rate_on && !snt) {                     /* the receiver no longer fetches live.mp4: normal speed, stop */
+            send_rate(c, transport, out, &rid, msid, "1");
+            how = "the stream ended"; rate_on = 0; st = DONE; stop_at = now + TRACE_AFTER_MS;
+            continue;
+        }
+        if (st == DONE) continue;                  /* only watching now */
         if (st == MEASURE) {
-            if (!have || !playing_since || now - playing_since < TUNE_SETTLE_MS) continue;
+            if (!have || !ready) continue;
             first = lag;
-            if (lag <= LAG_MAX) { how = "no catch-up needed"; st = DONE; break; }
-            snprintf(out, 1024, "{\"type\":\"SEEK\",\"requestId\":%d,\"mediaSessionId\":%ld,\"currentTime\":%.3f,"
-                     "\"resumeState\":\"PLAYBACK_START\"}", rid++, msid, sent - LAG_TARGET);
-            if (send_msg(c, transport, NS_MEDIA, out)) break;
-            st = SEEKING; seek_at = now;
+            stop_at = now + TUNE_MS;
+            if (lag <= LAG_MAX) { how = "no catch-up needed"; st = DONE; stop_at = now + TRACE_AFTER_MS; continue; }
+            st = lag > LAG_SLOW ? FAST : SLOW;
+            if (send_rate(c, transport, out, &rid, msid, st == FAST ? RATE_FAST : RATE_SLOW)) break;
+            rate_on = 1;
             set_state("playing", "playing on %s (low latency MP4, %.1f s behind: catching up)", g_device, first);
-        } else if (st == SEEKING) {
-            if (!refused && now - seek_at < SEEK_CHECK_MS) continue;
-            if (have && !refused && lag <= LAG_MAX && !strcmp(ps, "PLAYING")) { how = "jumped ahead"; st = DONE; break; }
-            snprintf(out, 1024, "{\"type\":\"SET_PLAYBACK_RATE\",\"requestId\":%d,\"mediaSessionId\":%ld,\"playbackRate\":" CATCHUP_RATE "}", rid++, msid);
-            if (send_msg(c, transport, NS_MEDIA, out)) break;
-            rate_on = 1; st = RATE;
-        } else if (st == RATE && have) {
-            if (lag <= LAG_TARGET) { how = "played faster for a moment"; st = DONE; }
-            else if (!strcmp(ps, "BUFFERING")) { how = "stopped catching up (the TV ran out of data)"; st = DONE; }
+        } else if (have) {
+            int finish = 0;
+            if (lag <= LAG_TARGET) { how = "played faster for a moment"; finish = 1; }
+            else if (strcmp(ps, "PLAYING")) { how = "stopped catching up (the TV ran out of data)"; finish = 1; }
+            else if (st == FAST && lag <= LAG_SLOW) {
+                if (send_rate(c, transport, out, &rid, msid, RATE_SLOW)) break;
+                st = SLOW;
+            }
+            if (finish) {                          /* normal speed now, then watch */
+                send_rate(c, transport, out, &rid, msid, "1");
+                rate_on = 0; st = DONE; stop_at = now + TRACE_AFTER_MS;
+            }
         }
     }
-    if (rate_on) {
-        snprintf(out, 1024, "{\"type\":\"SET_PLAYBACK_RATE\",\"requestId\":%d,\"mediaSessionId\":%ld,\"playbackRate\":1}", rid++, msid);
-        send_msg(c, transport, NS_MEDIA, out);
-    }
+    if (rate_on) send_rate(c, transport, out, &rid, msid, "1");
     if (st != DONE && !*how) how = tune_cancelled() ? "catch-up cancelled" : "the TV did not catch up";
     if (first >= 0) set_state("playing", "playing on %s (low latency MP4, %.1f s behind -> %.1f s: %s)", g_device, first, lag, how);
     pthread_mutex_lock(&g_lock);
@@ -554,6 +615,7 @@ static void do_cast(const char *ip, int port, int stop)
         pthread_mutex_unlock(&g_lock);
         hls_token_revoke(old);
     }
+    if (!stop) { pthread_mutex_lock(&g_lock); g_ntr = 0; pthread_mutex_unlock(&g_lock); trace("connect", "", -1, -1); }
     set_state("connecting", "%s", g_device);
     int fd = tcp_connect_to(ip, port, 5000, err, sizeof err);
     if (fd < 0) { set_state("error", "%s", err); return; }
@@ -615,6 +677,7 @@ static void do_cast(const char *ip, int port, int stop)
                 if (send_msg(c, transport, NS_CONN, "{\"type\":\"CONNECT\",\"userAgent\":\"ak_rtsp\"}") ||
                     send_load(c, transport, se, local, tok, mp4, 2, out, 1024)) { set_state("error", "%s closed the connection", g_device); goto done; }
                 loaded = 1;
+                trace(mp4 ? "load mp4" : "load hls", "", -1, -1);
                 set_state("loading", "%s is loading http://%s/hls/... (%s)", g_device, local, mp4 ? "low latency MP4" : "HLS");
             }
         } else if (!strcmp(m.ns, NS_MEDIA)) {
@@ -623,6 +686,7 @@ static void do_cast(const char *ip, int port, int stop)
             else if (!strcmp(type, "MEDIA_STATUS")) {
                 cast_player_state(json, ps, sizeof ps);
                 { double cur; long id = -1; char s2[24]; cast_media_status(json, s2, sizeof s2, &cur, &id); if (id >= 0) msid = id; }
+                trace("", ps, -1, -1);
                 if (!strcmp(ps, "PLAYING")) { set_state("playing", "playing on %s (%s)", g_device, mp4 ? "low latency MP4" : "HLS"); ok = 1; }
                 else if (!strcmp(ps, "IDLE")) {
                     char why[32] = "";
@@ -757,6 +821,14 @@ int cast_api(int is_post, const char *sub, const char *host, int port, char *out
         for (int i = 0; i < g_ndev && n > 0 && (size_t)n < cap; i++)
             n += snprintf(out + n, cap - (size_t)n, "%s{\"name\":\"%s\",\"model\":\"%s\",\"host\":\"%s\",\"port\":%d}",
                           i ? "," : "", g_dev[i].name, g_dev[i].model, g_dev[i].ip, g_dev[i].port);
+        if (n > 0 && (size_t)n + 16 < cap) n += snprintf(out + n, cap - (size_t)n, "],\"trace\":[");
+        for (int i = 0; i < g_ntr && n > 0 && (size_t)n + 160 < cap; i++) {   /* receiver states are device text: escaped */
+            char st[40], ev[60];
+            json_escape(st, sizeof st, g_tr[i].st);
+            json_escape(ev, sizeof ev, g_tr[i].ev);
+            n += snprintf(out + n, cap - (size_t)n, "%s[%.2f,\"%s\",%.2f,%.2f,\"%s\"]", i ? "," : "",
+                          g_tr[i].t, st, g_tr[i].cur, g_tr[i].sent, ev);
+        }
         if (n > 0 && (size_t)n < cap) snprintf(out + n, cap - (size_t)n, "]}");
         pthread_mutex_unlock(&g_lock);
         return 200;

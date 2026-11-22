@@ -74,6 +74,9 @@ static int64_t  g_ts_epoch = -1;        /* encoder ts of the first frame (timeli
 static uint32_t g_dropped;              /* segments lost to allocation failures */
 static int      g_mp4_n;                /* live.mp4 responses being sent */
 static struct { char tok[33]; int64_t started; uint64_t sent90; } g_mp4[HLS_MP4_MAX];   /* per stream: media sent */
+#define MP4_LOG 8
+static struct { int64_t start, end; uint64_t sent90; uint32_t ip; } g_mp4log[MP4_LOG];   /* last requests (diagnostics) */
+static unsigned g_mp4log_n;
 static int      s_cast_mp4 = 1;         /* hls.cast_format */
 
 /* ---- setting ------------------------------------------------------------------ */
@@ -517,10 +520,13 @@ static void serve_mp4(conn_t *cn, const char *tok, uint32_t ip)
     pthread_mutex_lock(&g_lock);
     int busy = g_mp4_n >= HLS_MP4_MAX;
     int slot = -1;
+    unsigned log_i = 0;
     if (!busy) {
         g_mp4_n++;
         for (int i = 0; i < HLS_MP4_MAX && slot < 0; i++) if (!g_mp4[i].tok[0]) slot = i;
         if (slot >= 0) { snprintf(g_mp4[slot].tok, sizeof g_mp4[slot].tok, "%s", tok); g_mp4[slot].started = mono_ms(); g_mp4[slot].sent90 = 0; }
+        log_i = g_mp4log_n++ % MP4_LOG;
+        g_mp4log[log_i].start = mono_ms(); g_mp4log[log_i].end = 0; g_mp4log[log_i].sent90 = 0; g_mp4log[log_i].ip = ip;
     }
     pthread_mutex_unlock(&g_lock);
     if (busy) { reply_text(cn, 503, "Service Unavailable", "too many live.mp4 streams\n"); return; }
@@ -574,7 +580,7 @@ static void serve_mp4(conn_t *cn, const char *tok, uint32_t ip)
             fmp4_set_last_duration(mux, (uint32_t)(d * 90));
             if (fmp4_flush(mux) != 0) break;
             pthread_mutex_lock(&g_lock);
-            if (slot >= 0) g_mp4[slot].sent90 = fmp4_video_time(mux);   /* cast.c: how far behind the player is */
+            if (slot >= 0) { g_mp4[slot].sent90 = fmp4_video_time(mux); g_mp4log[log_i].sent90 = g_mp4[slot].sent90; }   /* cast.c: how far behind the player is */
             pthread_mutex_unlock(&g_lock);
         }
         if (fflush(f) != 0) break;
@@ -588,7 +594,7 @@ static void serve_mp4(conn_t *cn, const char *tok, uint32_t ip)
     free(frame); free(it);
     pthread_mutex_lock(&g_lock);
     g_mp4_n--;
-    if (slot >= 0) memset(&g_mp4[slot], 0, sizeof g_mp4[slot]);
+    if (slot >= 0) { g_mp4log[log_i].end = mono_ms(); g_mp4log[log_i].sent90 = g_mp4[slot].sent90; memset(&g_mp4[slot], 0, sizeof g_mp4[slot]); }
     pthread_cond_broadcast(&g_cond);
     pthread_mutex_unlock(&g_lock);
 }
@@ -685,6 +691,16 @@ int hls_status_json(char *out, size_t cap)
             n += snprintf(out + n, cap - (size_t)n, "%s%.3f", first ? "" : ",", (double)g_mp4[i].sent90 / 90000.0);
             first = 0;
         }
+    /* last live.mp4 requests, oldest first: [start s, end s (0: running), media sent s, client] (camera monotonic s) */
+    if (n > 0 && (size_t)n + 16 < cap) n += snprintf(out + n, cap - (size_t)n, "],\"mp4_log\":[");
+    unsigned from = g_mp4log_n > MP4_LOG ? g_mp4log_n - MP4_LOG : 0;
+    for (unsigned k = from; k < g_mp4log_n && n > 0 && (size_t)n + 80 < cap; k++) {
+        unsigned i = k % MP4_LOG;
+        const uint8_t *a = (const uint8_t *)&g_mp4log[i].ip;
+        n += snprintf(out + n, cap - (size_t)n, "%s[%.2f,%.2f,%.2f,\"%u.%u.%u.%u\"]", k > from ? "," : "",
+                      (double)g_mp4log[i].start / 1000.0, (double)g_mp4log[i].end / 1000.0,
+                      (double)g_mp4log[i].sent90 / 90000.0, a[0], a[1], a[2], a[3]);
+    }
     if (n > 0 && (size_t)n < cap) n += snprintf(out + n, cap - (size_t)n, "]}");
     pthread_mutex_unlock(&g_lock);
     return n < 0 ? 0 : (size_t)n < cap ? n : (int)cap - 1;

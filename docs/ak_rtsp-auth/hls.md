@@ -132,13 +132,16 @@ for an IP address. **Play** makes the camera itself connect to the device and st
   `http://<camera address on that network>/hls/<new token>/live.mp4` (`video/mp4`, LIVE), answers PINGs, reports
   PLAYING / LOAD_FAILED / LAUNCH_ERROR, then closes its connection without CLOSE (the receiver keeps playing, as
   after any sender app exits). Stop asks for the receiver status and stops only the Default Media Receiver session.
-- Catch-up (live.mp4): a receiver buffers a few seconds before it starts playing and then plays at normal speed,
-  so that buffer stays as delay (about 5 s on an Android TV). For up to 30 s after PLAYING the camera polls the
-  receiver's position (GET_STATUS) and compares it with the media time live.mp4 has sent. Above 1.5 s behind it
-  sends SEEK to 1 s behind the newest frame; if the receiver refuses it (INVALID_REQUEST) or the delay stays, it
-  sets the playback rate to 1.3 until 1 s behind, then back to 1.0 (also when the receiver reports BUFFERING).
-  The status line shows the result: `5.2 s behind -> 1.0 s: jumped ahead`. Stop or a new cast cancels the
-  catch-up at once (rate back to 1.0 first).
+- Catch-up (live.mp4): a receiver buffers before it starts playing and then plays at normal speed, so that buffer
+  stays as delay. Measured on an Android TV: PLAYING at position 0, ~6 s of BUFFERING, then playing 8 s behind.
+  The camera keeps polling the receiver (GET_STATUS) and waits until it really plays (PLAYING with the position
+  moving for 2 s), then compares the position with the media time live.mp4 has sent. Above 1.5 s behind it sets
+  the playback rate to 1.5, to 1.2 below 3 s, and back to 1.0 at 1 s behind (also if the receiver stops playing,
+  after 60 s, on Stop or a new cast). About 20 s from 8 s behind; video only, so nothing sounds wrong. SEEK is not
+  used: an endless stream is not seekable (the TV jumped back instead). A receiver that refuses the rate change
+  is left as it is. The status line shows the result (`8.1 s behind -> 1.0 s: played faster for a moment`), and
+  `GET /api/hls/cast` keeps a `trace` of the last cast ([camera time, playerState, position, media sent, event]),
+  `/api/hls` an `mp4_log` of the last live.mp4 requests.
 - Format (`hls.cast_format`, the selector next to Play): `mp4` (default) = live.mp4, caught up to about 1 s behind live where the receiver allows it;
   `hls` = the playlist (`application/x-mpegurl`, fMP4 segments), 6-8 s behind. If the device answers the MP4 LOAD
   with LOAD_FAILED or a playback error, the camera loads HLS in the same session by itself (status: "refused the

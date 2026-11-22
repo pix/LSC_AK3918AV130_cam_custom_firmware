@@ -201,10 +201,10 @@ cast_wait() {   # poll GET /api/hls/cast until not busy; prints the state JSON
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$W/fc.key" -out "$W/fc.crt" -days 2 -subj /CN=fakecast 2>/dev/null
 : > "$W/fc.log"; : > "$W/fc2.log"; : > "$W/fc3.log"; : > "$W/fc4.log"; : > "$W/fc5.log"
 export LIVEMP4_SLACK=$SLACK
-python3 -I "$T/fake_cast.py" 8009 "$W/fc.crt" "$W/fc.key" "$W/fc.log" --mdns "$H" --launch-delay 5 --preroll 4 > "$W/fc.out" 2>&1 & FC=$!
+python3 -I "$T/fake_cast.py" 8009 "$W/fc.crt" "$W/fc.key" "$W/fc.log" --mdns "$H" --launch-delay 5 --preroll 4 --play-secs 40 > "$W/fc.out" 2>&1 & FC=$!
 python3 -I "$T/fake_cast.py" 8010 "$W/fc.crt" "$W/fc.key" "$W/fc2.log" --behavior load_failed > "$W/fc2.out" 2>&1 & FC2=$!
 python3 -I "$T/fake_cast.py" 8012 "$W/fc.crt" "$W/fc.key" "$W/fc3.log" --behavior mp4_refused > "$W/fc3.out" 2>&1 & FC3=$!
-python3 -I "$T/fake_cast.py" 8013 "$W/fc.crt" "$W/fc.key" "$W/fc4.log" --behavior noseek --preroll 4 --play-secs 30 > "$W/fc4.out" 2>&1 & FC4=$!
+python3 -I "$T/fake_cast.py" 8013 "$W/fc.crt" "$W/fc.key" "$W/fc4.log" --behavior nocatchup --preroll 4 --play-secs 30 > "$W/fc4.out" 2>&1 & FC4=$!
 python3 -I "$T/fake_cast.py" 8014 "$W/fc.crt" "$W/fc.key" "$W/fc5.log" --behavior noseek --preroll 4 --play-secs 30 > "$W/fc5.out" 2>&1 & FC5=$!
 sleep 1
 expect 202 "$(code "${A[@]}" -X POST "http://$H/api/hls/cast/discover")" "start discovery"
@@ -259,12 +259,16 @@ expect 202 "$(code "${A[@]}" --data "host=$H" "http://$H/api/hls/cast")" "cast t
 j=$(cast_wait)
 [ "$(echo "$j" | jget state)" = playing ] && [[ "$j" == *"low latency MP4"* ]] && ok "cast state: $j" || bad "cast state: $j"
 r=$(receiver_check "$W/fc.log" mp4) && ok "receiver side (mp4): $r" || bad "receiver side (mp4): $r"
-[[ "$j" == *"jumped ahead"* ]] && echo "$j" | python3 -I -c 'import json, re, sys
+[[ "$j" == *"played faster for a moment"* ]] && echo "$j" | python3 -I -c 'import json, re, sys
 m = re.search(r"([0-9.]+) s behind -> ([0-9.]+) s", json.load(sys.stdin)["message"]); sys.exit(0 if m and float(m[1]) > 3 and float(m[2]) <= 1.5 else 1)' \
-  && ok "catch-up: jumped from the receiver's start-up buffer to ~1 s behind: $(echo "$j" | jget message)" || bad "catch-up (seek): $j"
+  && ok "catch-up: from the receiver's start-up buffer to ~1 s behind by playing faster: $(echo "$j" | jget message)" || bad "catch-up: $j"
 python3 -I -c 'import json, sys
-p = [json.loads(l) for l in open(sys.argv[1]) if "\"played\"" in l][-1]; sys.exit(0 if len(p.get("seeks", [])) == 1 and not p.get("rates") else 1)' "$W/fc.log" \
-  && ok "one SEEK, playback rate untouched" || bad "seeks / rates: $(grep '"played"' "$W/fc.log" | tail -1)"
+p = [json.loads(l) for l in open(sys.argv[1]) if "\"played\"" in l][-1]
+sys.exit(0 if p.get("rates") == [1.5, 1.2, 1.0] and not p.get("seeks") else 1)' "$W/fc.log" \
+  && ok "rates 1.5 -> 1.2 -> 1.0 once really playing, no SEEK (an endless stream is not seekable)" || bad "seeks / rates: $(grep '"played"' "$W/fc.log" | tail -1)"
+expect True "$(curl "${A[@]}" "http://$H/api/hls/cast" | python3 -I -c 'import json, sys
+t = json.load(sys.stdin)["trace"]; ev = [e[4] for e in t]; st = [e[1] for e in t]
+print(all(x in ev for x in ("connect", "load mp4", "rate 1.5", "rate 1")) and "BUFFERING" in st and "PLAYING" in st)')" "trace: connect, load, start-up BUFFERING, PLAYING, rates"
 expect False "$(hls_state | jget running)" "an MP4 cast does not start the HLS producer"
 CT=$(python3 -I -c 'import json, re, sys
 u = [json.loads(l) for l in open(sys.argv[1])]; u = [e["media"]["contentId"] for e in u if e["ev"] == "load"][-1]
@@ -292,14 +296,13 @@ expect 202 "$(code "${A[@]}" --data "host=$H&port=8012" "http://$H/api/hls/cast"
 j=$(cast_wait)
 [ "$(echo "$j" | jget state)" = playing ] && [[ "$j" == *"(HLS)"* ]] && ok "fell back to HLS: $j" || bad "fallback: $j"
 r=$(receiver_check "$W/fc3.log" fallback) && ok "receiver side (fallback): $r" || bad "receiver side (fallback): $r"
-# 4. a receiver that refuses SEEK: plays faster until ~1 s behind, then normal speed again
-expect 202 "$(code "${A[@]}" --data "host=$H&port=8013" "http://$H/api/hls/cast")" "cast to a receiver that refuses SEEK"
+# 4. a receiver that refuses a faster playback rate: reported, nothing else tried
+expect 202 "$(code "${A[@]}" --data "host=$H&port=8013" "http://$H/api/hls/cast")" "cast to a receiver that refuses SET_PLAYBACK_RATE"
 j=$(cast_wait)
-[[ "$j" == *"played faster for a moment"* ]] && ok "catch-up by playback rate: $(echo "$j" | jget message)" || bad "catch-up (rate): $j"
+[[ "$j" == *"refused to play faster"* ]] && ok "rate refused reported: $(echo "$j" | jget message)" || bad "rate refused: $j"
 for i in $(seq 1 $((40 * F))); do grep -q '"ev": "played"' "$W/fc4.log" && break; sleep 1; done
-python3 -I -c 'import json, sys
-p = [json.loads(l) for l in open(sys.argv[1]) if "\"played\"" in l][-1]; sys.exit(0 if p.get("rates") == [1.3, 1.0] and not p.get("seeks") else 1)' "$W/fc4.log" \
-  && ok "playback rate 1.3 then back to 1.0" || bad "rates: $(grep '"played"' "$W/fc4.log" | tail -1)"
+nrate=$(grep -c '"type": "SET_PLAYBACK_RATE"' "$W/fc4.log"); nseek=$(grep -c '"type": "SEEK"' "$W/fc4.log")
+[ "$nrate" = 1 ] && [ "$nseek" = 0 ] && ok "one rate request, no retry, no SEEK" || bad "after a refusal: $nrate rate, $nseek seek requests"
 # 5. Stop while catching up: accepted at once, normal speed restored, receiver stopped
 expect 202 "$(code "${A[@]}" --data "host=$H&port=8014" "http://$H/api/hls/cast")" "cast to $H:8014"
 for i in $(seq 1 $((80 * F))); do grep -q '"type": "SET_PLAYBACK_RATE"' "$W/fc5.log" && break; sleep 0.5; done
