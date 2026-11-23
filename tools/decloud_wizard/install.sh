@@ -1187,12 +1187,15 @@ EOF_PY
 }
 cam_send() {
     # Send local file $1 to the camera as $2 (on its SD card) over the LAN; verify it.
-    local src="$1" dst="$2" want got
+    local src="$1" dst="$2" want got size
     want="$(md5sum "$src" | cut -c1-32)"
-    for _ in 1 2; do
+    size="$(stat -c%s "$src")"
+    for _ in 1 2 3; do
         cam_exec "pkill -x nc 2>/dev/null; rm -f '$dst'; setsid sh -c \"nc -l -p 9188 > '$dst'\" </dev/null >/dev/null 2>&1 &" >/dev/null \
             || die "Could not start the transfer on the camera."
         sleep 1
+        # Send in chunks: a socket timeout bounds a whole sendall(), so one
+        # 5 MiB sendall() with a 15 s timeout fails on links under ~350 KB/s.
         python3 -I - "$CAMERA_IP" 9188 "$src" <<'EOF_PY' || true
 import socket, sys, time
 host, port, src = sys.argv[1], int(sys.argv[2]), sys.argv[3]
@@ -1203,15 +1206,24 @@ for i in range(20):
         time.sleep(0.5)
 else:
     sys.exit("cannot connect to the camera")
-s.sendall(open(src, "rb").read())
-s.shutdown(socket.SHUT_WR)
-s.recv(1)
+s.settimeout(60)
+try:
+    with open(src, "rb") as f:
+        while True:
+            b = f.read(32768)
+            if not b: break
+            s.sendall(b)
+    s.shutdown(socket.SHUT_WR)
+    s.settimeout(120)
+    s.recv(1)
+except OSError as e:
+    sys.exit("transfer to the camera interrupted: %s" % e)
 s.close()
 EOF_PY
-        sleep 1
-        got="$(cam_exec "md5sum '$dst' | cut -c1-32" | tr -dc '0-9a-f')" || true
+        # Let the camera's nc finish writing before checking the file.
+        got="$(cam_exec "i=0; while pidof nc >/dev/null && [ \$i -lt 60 ]; do sleep 1; i=\$((i+1)); done; sync; md5sum '$dst' | cut -c1-32" 90 | tr -dc '0-9a-f')" || true
         [[ "$got" == "$want" ]] && return 0
-        warn "The copy of $(basename "$src") on the camera did not verify; retrying."
+        warn "The copy of $(basename "$src") on the camera did not verify ($(cam_exec "wc -c < '$dst'; df -k /tmp/sd | tail -n1" | tr '\n' ' ' | tr -s ' ') of $size bytes); retrying."
     done
     die "Could not copy $(basename "$src") to the camera. Nothing was changed."
 }
